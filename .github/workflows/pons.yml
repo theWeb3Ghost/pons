@@ -1,0 +1,33 @@
+name: pons
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: pons
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - name: Index (catch up, self-quits at 4h so data always saves)
+        env:
+          RPC_URLS: ${{ secrets.RPC_URLS }}
+          START_BLOCK: ${{ secrets.START_BLOCK }}
+          INDEX_MAX_MINUTES: 240
+        run: node pons-index.mjs --backfill
+
+      - name: Save data back to repo
+        run: |
+          git config user.name "pons-bot"
+          git config user.email "actions@github.com"
+          git add pons_data/
+          git diff --cached --quiet || git commit -m "data $(date -u +%FT%TZ)"
+          git push
