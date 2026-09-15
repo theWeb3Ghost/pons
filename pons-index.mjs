@@ -40,9 +40,9 @@ const C = {
   POLL_MS: Number(process.env.POLL_MS || 8000),
   CONFIRMATIONS: Number(process.env.CONFIRMATIONS || 5),
   ANCHOR_EVERY: Number(process.env.ANCHOR_EVERY || 5000),
-  RPC_MAX_RPS: Number(process.env.RPC_MAX_RPS || 8),
-  RPC_MIN_RPS: Number(process.env.RPC_MIN_RPS || 0.2),
-  RPC_NUDGE_OK: Number(process.env.RPC_NUDGE_OK || 20),
+  RPC_MAX_RPS: Number(process.env.RPC_MAX_RPS) || 8,
+  RPC_MIN_RPS: Number(process.env.RPC_MIN_RPS) || 0.2,
+  RPC_NUDGE_OK: Number(process.env.RPC_NUDGE_OK) || 20,
   TRACK_WALLETS: process.env.TRACK_WALLETS !== '0',
   SAVE_TRADES: process.env.SAVE_TRADES === '1',
   PROBE_PENDING: process.env.PROBE_PENDING !== '0',
@@ -99,37 +99,8 @@ const ZERO_ADDR = '0x' + '0'.repeat(40);
 const replacer = (_k, v) => (typeof v === 'bigint' ? v.toString() : v);
 
 /* ── keccak256 (node's sha3 ≠ keccak) ───────────────────────────────── */
-const M64 = 0xffffffffffffffffn;
-const RC = [1n,0x8082n,0x800000000000808an,0x8000000080008000n,0x808bn,0x80000001n,0x8000000080008081n,
-  0x8000000000008009n,0x8an,0x88n,0x80008009n,0x8000000an,0x8000808bn,0x800000008000008bn,0x8000000000008089n,
-  0x8000000000008003n,0x8000000000008002n,0x8000000000000080n,0x800an,0x800000008000000an,0x8000000080008081n,
-  0x8000000000008080n,0x80000001n,0x8000000080008008n];
-const ROT = [[0,36,3,41,18],[1,44,10,45,2],[62,6,43,15,61],[28,55,25,21,56],[27,20,39,8,14]];
-const rotl = (x, n) => (n === 0 ? x : ((x << BigInt(n)) | (x >> BigInt(64 - n))) & M64);
-function keccakF(A) {
-  for (let r = 0; r < 24; r++) {
-    const C2 = [], D = [];
-    for (let x = 0; x < 5; x++) C2[x] = A[x][0] ^ A[x][1] ^ A[x][2] ^ A[x][3] ^ A[x][4];
-    for (let x = 0; x < 5; x++) D[x] = C2[(x + 4) % 5] ^ rotl(C2[(x + 1) % 5], 1);
-    for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) A[x][y] ^= D[x];
-    const Bm = Array.from({ length: 5 }, () => Array(5).fill(0n));
-    for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) Bm[y][(2 * x + 3 * y) % 5] = rotl(A[x][y], ROT[x][y]);
-    for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++)
-      A[x][y] = Bm[x][y] ^ ((~Bm[(x + 1) % 5][y] & M64) & Bm[(x + 2) % 5][y]);
-    A[0][0] ^= RC[r];
-  }
-}
-function keccak256(buf) {
-  const rate = 136, S = Array.from({ length: 5 }, () => Array(5).fill(0n));
-  const pad = [...buf, 0x01]; while (pad.length % rate) pad.push(0); pad[pad.length - 1] |= 0x80;
-  for (let off = 0; off < pad.length; off += rate) {
-    for (let i = 0; i < rate; i++) { const li = (i / 8) | 0; S[li % 5][(li / 5) | 0] ^= BigInt(pad[off + i]) << BigInt(8 * (i % 8)); }
-    keccakF(S);
-  }
-  const out = Buffer.alloc(32);
-  for (let i = 0; i < 32; i++) { const li = (i / 8) | 0; out[i] = Number((S[li % 5][(li / 5) | 0] >> BigInt(8 * (i % 8))) & 0xffn); }
-  return '0x' + out.toString('hex');
-}
+import jssha from 'js-sha3';
+const keccak256 = (buf) => '0x' + jssha.keccak_256(Buffer.from(buf));
 if (keccak256(Buffer.alloc(0)) !== '0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470') {
   console.error('FATAL: keccak self-test failed'); process.exit(1);
 }
@@ -143,8 +114,8 @@ const EPS = RPC_LIST.map(rawUrl => {
   const u = new URL(rawUrl), s = RPC_SAVED[u.host] || {};
   return { url: rawUrl, u, host: u.host,
     agent: (u.protocol === 'http:' ? http : https).Agent({ keepAlive: true, maxSockets: 1, keepAliveMsecs: 30000 }),
-    budget: Math.min(C.RPC_MAX_RPS, Math.max(C.RPC_MIN_RPS, s.budget || 1)),
-    tokens: s.budget || 1, lastRefill: Date.now(),
+    budget: Number(Math.min(C.RPC_MAX_RPS, Math.max(C.RPC_MIN_RPS, Number(s.budget) || 1))) || 1,
+    tokens: Number(s.budget) || 1, lastRefill: Date.now(),
     okStreak: 0, n429: 0, coolUntil: 0, deadUntil: 0, lat: s.lat || 400, reqs: 0, errs: 0, limits: 0 };
 });
 function refill(ep) { const now = Date.now();
