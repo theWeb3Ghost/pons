@@ -1,9 +1,9 @@
-pons — Pons v2 launchpad research pipeline
-Indexes every launch on the Pons v2 launchpad (Robinhood Chain, chain ID 4663)directly from the blockchain — no scraping, no APIs in the trust path — then profileswhat the highest-earning tokens have in common.
+_**pons - Pons v2 launchpad research pipeline**_
+Indexes every launch on the Pons v2 launchpad (Robinhood Chain, chain ID 4663)directly from the blockchain - no scraping, no APIs in the trust path - then profileswhat the highest-earning tokens have in common.
 
-Runs itself hourly on GitHub Actions. Costs $0.
+"**Runs itself hourly on GitHub Actions. Costs $0.**"
 
-What it collects
+**What it collects**
 For every token ever launched through the factory:
 
 Metadata — name, symbol, logo, description, twitter/telegram/discord/website/farcaster,creator tax, fee wallet, pair token, snipe-tax exemptions (decoded from the launchtransaction input)
@@ -12,7 +12,7 @@ Creator earnings, exact — swept + rescued + pending, curve-side and post-gradu
 Windows — fees generated and credited in the first 1h / 24h vs all-time
 War telemetry — snipe tax charged, sniper wallets, declared exemptions
 Lifecycle — graduation, V4 pool id, phase, buyback enablement
-Data sources are the verified contracts themselves: PonsV2LaunchFactory,PonsV2BondingCurve, PonsV2LauncherToken, PonsV2MemeHook — exact eventsignatures and ABI reads, no guesswork.
+Data sources are the verified contracts themselves: PonsV2LaunchFactory,PonsV2BondingCurve, PonsV2LauncherToken, PonsV2MemeHook - exact eventsignatures and ABI reads, no guesswork.
 
 How it works
 GitHub Actions (hourly)
