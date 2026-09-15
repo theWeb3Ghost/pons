@@ -212,7 +212,8 @@ function evFromSig(sig) {
     const indexed = p.includes('indexed'); p = p.replace('indexed', '').trim().split(/\s+/);
     return { type: p[0], name: p[1] || `a${i}`, indexed };
   }) : [];
-  return { name, inputs, sig, topic: keccak256(Buffer.from(sig, 'utf8')) };
+  const canonical = `${name}(${inputs.map(i => i.type).join(',')})`;   // ← THE FIX
+  return { name, inputs, sig: canonical, topic: keccak256(Buffer.from(canonical, 'utf8')) };
 }
 const EV = new Map();
 const reg = (sig) => { const e = evFromSig(sig); if (!EV.has(e.topic)) EV.set(e.topic, e); };
