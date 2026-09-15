@@ -1,0 +1,3 @@
+.env
+pons_data/pons_events.jsonl
+pons_data/pons_trades.jsonl
