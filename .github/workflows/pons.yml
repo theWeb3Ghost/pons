@@ -24,6 +24,7 @@ jobs:
           RPC_URLS: ${{ secrets.RPC_URLS }}
           START_BLOCK: ${{ secrets.START_BLOCK }}
           INDEX_MAX_MINUTES: 240
+          CHUNK: '9000' 
         run: node pons-index.mjs --backfill
 
       - name: Save data back to repo
