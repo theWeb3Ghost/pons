@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
+      - name: Install dependency
+        run: npm install js-sha3
 
       - name: Index (catch up, self-quits at 4h so data always saves)
         env:
