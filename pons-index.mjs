@@ -144,7 +144,7 @@ function rawCall(ep, body) {
     req.on('error', reject); req.write(body); req.end();
   });
 }
-const isLimitMsg = (m) => /rate|limit|429|too many|exceed|quota|capacity|backoff|spam/i.test(m);
+const isLimitMsg = (m) => /rate|limit|429|too many|exceed|quota|capacity|backoff|spam|block range|tier|plan|-32600/i.test(m);
 function penalize(ep, detail) {
   const e = new Error(`limit @${ep.host}: ${detail}`);
   e.isLimit = true; e.rateLimited = true;
