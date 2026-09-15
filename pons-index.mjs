@@ -544,28 +544,34 @@ async function probePending(l) {
 /* ── reducers ───────────────────────────────────────────────────────── */
 function ensureRow(token) {
   let l = L.get(token);
-  if (!l) l = L.get(token) = {
-    token, curve: '', creator: '', originalDeployer: '', feeRecipient: '',
-    name: '', symbol: '', description: '', image: '', website: '', twitter: '', telegram: '', discord: '', farcaster: '',
-    pairAsset: ZERO_ADDR, pairDecimals: 18, ethPair: true,
-    creatorTaxBps: 0n, curveFeeBps: 0n, snipeTaxStartBps: 0n, snipeTaxSeconds: 0n,
-    protocolShareBps: 0n, buybackBurnBps: 0n,
-    totalSupply: 0n, graduationThreshold: 0n, launchConfigId: 0n, poolFee: 0, tickSpacing: 0, phase: 0,
-    buybackEnabled: false, snipeExemptions: [], snipeExemptCount: 0,
-    launchBlock: 0, launchTs: 0, launchTx: '', metaFromTx: false, enriched: false,
-    buyVolume: 0n, sellVolume: 0n, buys: 0, sells: 0, buyers: new Set(), sellers: new Set(),
-    firstTradeTs: 0, lastTradeTs: 0, lastTradeBlock: 0, earlyVolMin: Array(30).fill(0n),
-    vol1h: 0n, trades1h: 0,
-    peakPrice: 0, lastPrice: 0, peakBlock: 0,
-    graduated: false, gradBlock: 0, gradTs: 0, gradFailed: false, poolId: '',
-    gradQuote: 0n, gradTokens: 0n, gradSweptQuote: 0n, gradSweptTokens: 0n, rescuedQuote: 0n, lockedTokens: 0n,
-    sweptCurve: 0n, rescuedCreator: 0n, poolCreator: 0n, poolRescued: 0n, pendingCurve: 0n, pendingHook: 0n,
-    buybackQuote: 0n, buybackTokens: 0n,
-    earn1h: 0n, earn24h: 0n, gen1h: 0n, gen24h: 0n, genTotal: 0n, bb1h: 0n,
-    snipeTaxTotal: 0n, snipers: new Set(),
-  };
+  if (!l) {
+    l = {
+      token, curve: '', creator: '', originalDeployer: '', feeRecipient: '',
+      name: '', symbol: '', description: '', image: '', website: '', twitter: '', telegram: '', discord: '', farcaster: '',
+      pairAsset: ZERO_ADDR, pairDecimals: 18, ethPair: true,
+      creatorTaxBps: 0n, curveFeeBps: 0n, snipeTaxStartBps: 0n, snipeTaxSeconds: 0n,
+      protocolShareBps: 0n, buybackBurnBps: 0n,
+      totalSupply: 0n, graduationThreshold: 0n, launchConfigId: 0n, poolFee: 0, tickSpacing: 0, phase: 0,
+      buybackEnabled: false, snipeExemptions: [], snipeExemptCount: 0,
+      launchBlock: 0, launchTs: 0, launchTx: '', metaFromTx: false, enriched: false,
+      buyVolume: 0n, sellVolume: 0n, buys: 0, sells: 0, buyers: new Set(), sellers: new Set(),
+      firstTradeTs: 0, lastTradeTs: 0, lastTradeBlock: 0, earlyVolMin: Array(30).fill(0n),
+      vol1h: 0n, trades1h: 0,
+      peakPrice: 0, lastPrice: 0, peakBlock: 0,
+      graduated: false, gradBlock: 0, gradTs: 0, gradFailed: false, poolId: '',
+      gradQuote: 0n, gradTokens: 0n, gradSweptQuote: 0n, gradSweptTokens: 0n, rescuedQuote: 0n, lockedTokens: 0n,
+      sweptCurve: 0n, rescuedCreator: 0n, poolCreator: 0n, poolRescued: 0n, pendingCurve: 0n, pendingHook: 0n,
+      buybackQuote: 0n, buybackTokens: 0n,
+      earn1h: 0n, earn24h: 0n, gen1h: 0n, gen24h: 0n, genTotal: 0n, bb1h: 0n,
+      snipeTaxTotal: 0n, snipers: new Set(),
+    };
+    L.set(token, l);
+  }
   return l;
 }
+
+
+
 const topicAddr = (t) => (t && t.length === 66 ? '0x' + t.slice(-40) : undefined);
 const byCurve = (lg) => L.get(curveToToken.get(addr(lg.address)) || '');
 const byPool = (pid) => L.get(poolToToken.get(String(pid ?? '').toLowerCase()) || '');
