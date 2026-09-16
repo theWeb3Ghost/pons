@@ -46,7 +46,7 @@ const C = {
   TRACK_WALLETS: process.env.TRACK_WALLETS !== '0',
   SAVE_TRADES: process.env.SAVE_TRADES === '1',
   PROBE_PENDING: process.env.PROBE_PENDING !== '0',
-    MAX_MINUTES: Number(process.env.INDEX_MAX_MINUTES || 0),   // 0 = no limit (0 is fine on a VPS)
+  MAX_MINUTES: Number(process.env.INDEX_MAX_MINUTES || 0),   // 0 = no limit (0 is fine on a VPS)
   SUPPLY_FETCH: process.env.SUPPLY_FETCH === '1',
 };
 
@@ -115,7 +115,7 @@ const EPS = RPC_LIST.map(rawUrl => {
   return { url: rawUrl, u, host: u.host,
     agent: (u.protocol === 'http:' ? http : https).Agent({ keepAlive: true, maxSockets: 1, keepAliveMsecs: 30000 }),
     budget: Number(Math.min(C.RPC_MAX_RPS, Math.max(C.RPC_MIN_RPS, Number(s.budget) || 1))) || 1,
-    tokens: Number(s.budget) || 1, lastRefill: Date.now(),
+    tokens: Number(s.budget) || 2, lastRefill: Date.now(),
     okStreak: 0, n429: 0, coolUntil: 0, deadUntil: 0, lat: s.lat || 400, reqs: 0, errs: 0, limits: 0 };
 });
 function refill(ep) { const now = Date.now();
@@ -172,7 +172,7 @@ async function rpc(method, params, tries = 8) {
         throw new Error(`${method} @${ep.host}: ${JSON.stringify(j.error).slice(0, 120)}`);
       }
       ep.n429 = 0; ep.errs = 0; ep.okStreak++;
-      if (ep.okStreak >= C.RPC_NUDGE_OK) { ep.budget = Math.min(C.RPC_MAX_RPS, ep.budget * 1.1); ep.okStreak = 0; }
+      if (ep.okStreak >= C.RPC_NUDGE_OK) { ep.budget = Math.min(C.RPC_MAX_RPS, ep.budget * 1.25); ep.okStreak = 0; }
       return j.result;
     } catch (e) {
       lastErr = e;
@@ -450,9 +450,9 @@ function decodeSocials5(ret) {        // socials() → 5 strings (heads: 160, th
 
 /* ── enrichment ─────────────────────────────────────────────────────── */
 const enrichQueue = [];
-async function drainEnrich() {
+async function drainEnrich(maxItems = Infinity) {
   let n = 0;
-  while (enrichQueue.length) {
+  while (enrichQueue.length && n < maxItems) {
     const token = enrichQueue.shift();
     const l = L.get(token); if (!l || (l.enriched && l.metaFromTx)) continue;
     try {
@@ -689,7 +689,7 @@ async function processLogs(logs) {
     raws.push({ ev: def.name, block: Number(lg.blockNumber), ts, tx: lg.transactionHash, src, args: a });
   }
   appendLines(P.events, raws);
-  if (enrichQueue.length) await drainEnrich();
+  if (enrichQueue.length) await drainEnrich(8);   // cap per window; the rest trails behind
   return raws.length;
 }
 async function scanFactory(a, b) { return processLogs(await fetchLogs([C.FACTORY], null, a, b)); }
