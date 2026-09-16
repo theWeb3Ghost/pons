@@ -689,7 +689,7 @@ async function processLogs(logs) {
     raws.push({ ev: def.name, block: Number(lg.blockNumber), ts, tx: lg.transactionHash, src, args: a });
   }
   appendLines(P.events, raws);
-  if (enrichQueue.length) await drainEnrich(8);   // cap per window; the rest trails behind
+   // metadata deferred — discovered launches are enriched after the pass   // cap per window; the rest trails behind
   return raws.length;
 }
 async function scanFactory(a, b) { return processLogs(await fetchLogs([C.FACTORY], null, a, b)); }
@@ -751,8 +751,12 @@ async function backfill() {
     STATE.activityBlock = to; tick(false, STATE.factoryBlock, 'activity');
     if (n) process.stdout.write(`(+${n})`);
   }
-  for (const l of L.values()) if (!l.enriched || !l.metaFromTx) enrichQueue.push(l.token);
-  await drainEnrich();
+  saveLaunches(); saveState(); persistAnchors();   // BANK FIRST — from here on, the run cannot be lost
+  if (!outOfTime()) {                              // garnish only if time remains
+    for (const l of L.values()) if (!l.enriched || !l.metaFromTx) enrichQueue.push(l.token);
+    await drainEnrich(1000);
+    saveLaunches(); saveState();
+  }                       // bank again after garnish
   if (C.PROBE_PENDING && !outOfTime()) {                                        // ← NEW (skip probe when time's up)
     let i = 0;
     for (const l of L.values()) { await probePending(l); if (++i % 200 === 0) { log(`[pending] ${i}/${L.size}`); saveLaunches(); } }

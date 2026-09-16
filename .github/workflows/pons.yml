@@ -8,6 +8,9 @@ concurrency:
   group: pons
   cancel-in-progress: false
 
+permissions:
+  contents: write        # ← add these two lines
+
 jobs:
   index:
     runs-on: ubuntu-latest
@@ -24,7 +27,8 @@ jobs:
           RPC_URLS: ${{ secrets.RPC_URLS }}
           START_BLOCK: ${{ secrets.START_BLOCK }}
           INDEX_MAX_MINUTES: 240
-          CHUNK: '9000' 
+          CHUNK: '9000'
+          PROBE_PENDING: '0'
         run: node pons-index.mjs --backfill
 
       - name: Save data back to repo
