@@ -20,6 +20,7 @@ import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import readline from 'node:readline';
+import zlib from 'node:zlib';
 
 try { for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
@@ -135,15 +136,20 @@ function pickEp() {
 }
 function rawCall(ep, body) {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const req = (ep.u.protocol === 'http:' ? http : https).request({
       hostname: ep.u.hostname, port: ep.u.port || (ep.u.protocol === 'https:' ? 443 : 80),
       path: ep.u.pathname + ep.u.search, method: 'POST', agent: ep.agent,
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
-    }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ s: res.statusCode, t: d })); });
-    req.setTimeout(25000, () => req.destroy(new Error('timeout')));
-    req.on('error', reject); req.write(body); req.end();
+    }, res => { let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { settled = true; resolve({ s: res.statusCode, t: d }); }); });
+    req.setTimeout(25000, () => { if (!settled) { settled = true; try { req.destroy(); } catch {} reject(new Error('timeout')); } });
+    req.on('error', (e) => { if (!settled) { settled = true; reject(e); } });
+    req.write(body); req.end();
   });
 }
+
+
 const isLimitMsg = (m) => /rate|limit|429|too many|exceed|quota|capacity|backoff|spam|block range|tier|plan|-32600/i.test(m);
 function penalize(ep, detail) {
   const e = new Error(`limit @${ep.host}: ${detail}`);
@@ -283,7 +289,11 @@ function saveLaunches() {
   fs.writeFileSync(t, rows.map(r => JSON.stringify(r, replacer)).join('\n') + '\n');
   fs.renameSync(t, P.launches);
 }
+
+
 async function loadLaunches() {
+  if (!fs.existsSync(P.launches) && fs.existsSync(P.launches + '.gz'))
+    fs.writeFileSync(P.launches, zlib.gunzipSync(fs.readFileSync(P.launches + '.gz')));
   if (!fs.existsSync(P.launches)) return;
   const rl = readline.createInterface({ input: fs.createReadStream(P.launches), crlfDelay: Infinity });
   for await (const line of rl) {

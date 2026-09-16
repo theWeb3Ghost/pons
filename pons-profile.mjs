@@ -16,6 +16,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import zlib from 'node:zlib';
+
 
 try { for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
@@ -32,6 +34,8 @@ const SORT = (process.env.SORT || 'lift').toLowerCase();
 const SUPPLY_GUESS = Number(process.env.SUPPLY_GUESS || 1e9);
 const PAIR_ALL = process.argv.includes('--pair') && process.argv.includes('all');
 const topN = (() => { const i = process.argv.indexOf('--top'); return i > -1 ? Number(process.argv[i + 1]) : 0; })();
+
+
 
 const med = (a) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y), m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -50,11 +54,14 @@ const liftS = (l) => !Number.isFinite(l) ? 'new' : '×' + l.toFixed(2);
 
 /* ── load ───────────────────────────────────────────────────────────── */
 async function load() {
-  const file = path.join(DATA, 'pons_launches.jsonl');
+  let file = path.join(DATA, 'pons_launches.jsonl');
+  if (!fs.existsSync(file) && fs.existsSync(file + '.gz')) file += '.gz';
   if (!fs.existsSync(file)) { console.error(`no ${file} — run pons-index.mjs first`); process.exit(1); }
+  const raw = fs.createReadStream(file);
+  const stream = file.endsWith('.gz') ? raw.pipe(zlib.createGunzip()) : raw;
   const rows = [];
-  const rl = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
-  for await (const line of rl) {
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+for await (const line of rl) {
     if (!line) continue;
     let r; try { r = JSON.parse(line); } catch { continue; }
     const pd = Number(r.pairDecimals ?? 18), hu = (v) => Number(v ?? 0) / 10 ** pd;
