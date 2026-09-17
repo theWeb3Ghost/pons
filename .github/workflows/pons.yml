@@ -35,7 +35,7 @@ jobs:
         run: |
           git config user.name "pons-bot"
           git config user.email "actions@github.com"
-          gzip -kf pons_data/pons_launches.jsonl && rm -f pons_data/pons_launches.jsonl
           git add pons_data/
           git diff --cached --quiet || git commit -m "data $(date -u +%FT%TZ)"
+          git pull --rebase -X ours origin main || true
           git push
