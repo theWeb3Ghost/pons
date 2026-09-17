@@ -276,20 +276,24 @@ const anchors = new Map(Object.entries((() => { try { return JSON.parse(fs.readF
 const L = new Map(), curveToToken = new Map(), poolToToken = new Map(), poolQuote = new Map();
 const saveState = () => { const t = `${P.state}.tmp`; fs.writeFileSync(t, JSON.stringify(STATE, replacer)); fs.renameSync(t, P.state); };
 const appendLines = (file, rows) => { if (rows.length) fs.appendFileSync(file, rows.map(r => JSON.stringify(r, replacer)).join('\n') + '\n'); };
+
+
 function saveLaunches() {
-  const rows = [...L.values()].map(l => {
-    const earnings = l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook;
-    return { ...l, buyers: [...l.buyers], sellers: [...l.sellers], snipers: [...l.snipers],
-      creatorReward: earnings,
-      totalVolume: l.buyVolume + l.sellVolume,
-      buybackTotalQuote: l.buybackQuote,
-      creatorComp: earnings + l.buybackQuote };
-  });
   const t = `${P.launches}.tmp`;
-  fs.writeFileSync(t, rows.map(r => JSON.stringify(r, replacer)).join('\n') + '\n');
+  const fd = fs.openSync(t, 'w');
+  const all = [...L.values()], BATCH = 1000;
+  for (let i = 0; i < all.length; i += BATCH) {
+    const chunk = all.slice(i, i + BATCH).map(l => {
+      const earnings = l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook;
+      return JSON.stringify({ ...l, buyers: [...l.buyers], sellers: [...l.sellers], snipers: [...l.snipers],
+        creatorReward: earnings, totalVolume: l.buyVolume + l.sellVolume,
+        buybackTotalQuote: l.buybackQuote, creatorComp: earnings + l.buybackQuote }, replacer);
+    }).join('\n') + '\n';
+    fs.writeFileSync(fd, chunk);      // writes batches sequentially — never one giant string
+  }
+  fs.closeSync(fd);
   fs.renameSync(t, P.launches);
 }
-
 
 async function loadLaunches() {
   if (!fs.existsSync(P.launches) && fs.existsSync(P.launches + '.gz'))
