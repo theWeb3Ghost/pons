@@ -38,6 +38,7 @@ const C = {
   DATA_DIR: process.env.DATA_DIR || './pons_data',
   CHUNK_INIT: Number(process.env.CHUNK || 20000),
   ADDR_CHUNK: Number(process.env.ADDR_CHUNK || 200),
+  ACT_CHUNK: Number(process.env.ACT_CHUNK) || 2000,
   POLL_MS: Number(process.env.POLL_MS || 8000),
   CONFIRMATIONS: Number(process.env.CONFIRMATIONS || 5),
   ANCHOR_EVERY: Number(process.env.ANCHOR_EVERY || 5000),
@@ -278,8 +279,6 @@ const saveState = () => { const t = `${P.state}.tmp`; fs.writeFileSync(t, JSON.s
 const appendLines = (file, rows) => { if (rows.length) fs.appendFileSync(file, rows.map(r => JSON.stringify(r, replacer)).join('\n') + '\n'); };
 
 
-
-
 function saveLaunches() {
   const t = `${P.launches}.tmp`;
   const fd = fs.openSync(t, 'w');
@@ -288,8 +287,7 @@ function saveLaunches() {
     const chunk = all.slice(i, i + BATCH).map(l => {
       const earnings = l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook;
       return JSON.stringify({ ...l,
-        buyersN: Math.max(l.buyers.size, l._bN || 0), sellersN: Math.max(l.sellers.size, l._sN || 0),
-        snipersN: Math.max(l.snipers.size, l._snN || 0),
+        buyersN: l._bN || 0, sellersN: l._sN || 0, snipersN: l._snN || 0,
         buyers: undefined, sellers: undefined, snipers: undefined, snipeExemptions: undefined,
         creatorReward: earnings, totalVolume: l.buyVolume + l.sellVolume,
         buybackTotalQuote: l.buybackQuote, creatorComp: earnings + l.buybackQuote }, replacer);
@@ -299,6 +297,7 @@ function saveLaunches() {
   fs.closeSync(fd);
   fs.renameSync(t, P.launches);
 }
+
 
 
 async function loadLaunches() {
@@ -375,10 +374,12 @@ async function fetchLogs(addresses, topics, from, to) {
     const e = Math.min(s + STATE.chunk - 1, to);
     if ((s - from) % C.ANCHOR_EVERY < STATE.chunk) await Promise.all([ensureAnchor(s), ensureAnchor(e)]);
     let ok = true;
-    for (let i = 0; i < addresses.length; i += C.ADDR_CHUNK) {
-      const part = addresses.slice(i, i + C.ADDR_CHUNK);
+    for (let i = 0; i < Math.max(1, addresses.length); i += C.ADDR_CHUNK) {
+      const part = addresses ? addresses.slice(i, i + C.ADDR_CHUNK) : null;
+      const filter = part ? { address: part, topics, fromBlock: toHex(s), toBlock: toHex(e) }
+                          : { topics, fromBlock: toHex(s), toBlock: toHex(e) };
       try {
-        const logs = await rpc('eth_getLogs', [{ address: part, topics, fromBlock: toHex(s), toBlock: toHex(e) }]);
+        const logs = await rpc('eth_getLogs', [filter]);
         out.push(...(logs || []));
         if (++okStreak > 5 && STATE.chunk < C.CHUNK_INIT) { STATE.chunk = Math.min(C.CHUNK_INIT, STATE.chunk * 2); okStreak = 0; }
       } catch (err) {
@@ -722,11 +723,8 @@ async function processLogs(logs) {
 }
 async function scanFactory(a, b) { return processLogs(await fetchLogs([C.FACTORY], null, a, b)); }
 async function scanActivity(a, b) {
-  const targets = [...curveToToken.keys()];
-  if (C.HOOK) targets.push(C.HOOK);
-  if (!targets.length) return 0;
   const t = [[...EV.entries()].filter(([, d]) => ACTIVITY_NAMES.test(d.name.toLowerCase())).map(([k]) => k)];
-  return processLogs(await fetchLogs(targets, t, a, b));
+  return processLogs(await fetchLogs(null, t, a, b));
 }
 
 /* ── backfill + live ────────────────────────────────────────────────── */
@@ -765,7 +763,7 @@ async function backfill() {
   for (;;) {
     if (outOfTime()) { log('[time] cap reached — saving & exiting; next run resumes from checkpoint'); break; }   // ← NEW
     const h = (await head()) - C.CONFIRMATIONS;
-    if (STATE.factoryBlock >= h) break;
+    if (STATE.factoryBlock >= h - 100) break;
     const to = Math.min(STATE.factoryBlock + STATE.chunk, h);
     const n = await scanFactory(STATE.factoryBlock + 1, to);
     STATE.factoryBlock = to; tick(false, h, 'factory');
@@ -774,7 +772,7 @@ async function backfill() {
   saveState(); console.log('');
   while (STATE.activityBlock < STATE.factoryBlock) {
     if (outOfTime()) { log('[time] cap reached — saving & exiting; next run resumes from checkpoint'); break; }   // ← NEW
-    const to = Math.min(STATE.activityBlock + STATE.chunk, STATE.factoryBlock);
+    const to = Math.min(STATE.activityBlock + (C.ACT_CHUNK || STATE.chunk), STATE.factoryBlock);
     const n = await scanActivity(STATE.activityBlock + 1, to);
     STATE.activityBlock = to; tick(false, STATE.factoryBlock, 'activity');
     if (n) process.stdout.write(`(+${n})`);
