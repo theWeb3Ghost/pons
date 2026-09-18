@@ -278,6 +278,8 @@ const saveState = () => { const t = `${P.state}.tmp`; fs.writeFileSync(t, JSON.s
 const appendLines = (file, rows) => { if (rows.length) fs.appendFileSync(file, rows.map(r => JSON.stringify(r, replacer)).join('\n') + '\n'); };
 
 
+
+
 function saveLaunches() {
   const t = `${P.launches}.tmp`;
   const fd = fs.openSync(t, 'w');
@@ -285,15 +287,19 @@ function saveLaunches() {
   for (let i = 0; i < all.length; i += BATCH) {
     const chunk = all.slice(i, i + BATCH).map(l => {
       const earnings = l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook;
-      return JSON.stringify({ ...l, buyers: [...l.buyers], sellers: [...l.sellers], snipers: [...l.snipers],
+      return JSON.stringify({ ...l,
+        buyersN: Math.max(l.buyers.size, l._bN || 0), sellersN: Math.max(l.sellers.size, l._sN || 0),
+        snipersN: Math.max(l.snipers.size, l._snN || 0),
+        buyers: undefined, sellers: undefined, snipers: undefined, snipeExemptions: undefined,
         creatorReward: earnings, totalVolume: l.buyVolume + l.sellVolume,
         buybackTotalQuote: l.buybackQuote, creatorComp: earnings + l.buybackQuote }, replacer);
     }).join('\n') + '\n';
-    fs.writeFileSync(fd, chunk);      // writes batches sequentially — never one giant string
+    fs.writeFileSync(fd, chunk);
   }
   fs.closeSync(fd);
   fs.renameSync(t, P.launches);
 }
+
 
 async function loadLaunches() {
   if (!fs.existsSync(P.launches) && fs.existsSync(P.launches + '.gz'))
@@ -305,13 +311,21 @@ async function loadLaunches() {
     let r; try { r = JSON.parse(line); } catch { continue; }
     for (const f of BIGS) r[f] = B(r[f]);
     r.earlyVolMin = (r.earlyVolMin || []).map(B); while (r.earlyVolMin.length < 30) r.earlyVolMin.push(0n);
+    // wallet counts survive restarts even though the arrays are dropped at save time
+    r._bN  = Number(r.buyersN)  || (Array.isArray(r.buyers)  ? r.buyers.length  : 0);
+    r._sN  = Number(r.sellersN) || (Array.isArray(r.sellers) ? r.sellers.length : 0);
+    r._snN = Number(r.snipersN) || (Array.isArray(r.snipers) ? r.snipers.length : 0);
+    r.buyersN = r._bN; r.sellersN = r._sN; r.snipersN = r._snN;
     r.buyers = new Set(r.buyers || []); r.sellers = new Set(r.sellers || []); r.snipers = new Set(r.snipers || []);
+    if (!Array.isArray(r.snipeExemptions)) r.snipeExemptions = [];
     if (r.token) { L.set(r.token, r);
       if (r.curve) curveToToken.set(r.curve, r.token);
       if (r.poolId && !String(r.poolId).startsWith('v4pos:')) poolToToken.set(String(r.poolId).toLowerCase(), r.token); }
   }
   log(`[resume] ${L.size} launches loaded`);
 }
+
+
 const progSamples = [];
 function progress(phase, headBlock) {
   const cur = Math.max(STATE.factoryBlock, 0), span = Math.max(1, headBlock - C.START_BLOCK);
