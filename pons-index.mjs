@@ -287,7 +287,9 @@ function saveLaunches() {
     const chunk = all.slice(i, i + BATCH).map(l => {
       const earnings = l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook;
       return JSON.stringify({ ...l,
-        buyersN: l._bN || 0, sellersN: l._sN || 0, snipersN: l._snN || 0,
+        buyersN: Math.max(l._bN || 0, l.buyers.size),
+        sellersN: Math.max(l._sN || 0, l.sellers.size),
+        snipersN: Math.max(l._snN || 0, l.snipers.size),
         buyers: undefined, sellers: undefined, snipers: undefined, snipeExemptions: undefined,
         creatorReward: earnings, totalVolume: l.buyVolume + l.sellVolume,
         buybackTotalQuote: l.buybackQuote, creatorComp: earnings + l.buybackQuote }, replacer);
