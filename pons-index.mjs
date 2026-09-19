@@ -374,7 +374,8 @@ async function fetchLogs(addresses, topics, from, to) {
     const e = Math.min(s + STATE.chunk - 1, to);
     if ((s - from) % C.ANCHOR_EVERY < STATE.chunk) await Promise.all([ensureAnchor(s), ensureAnchor(e)]);
     let ok = true;
-    for (let i = 0; i < Math.max(1, addresses.length); i += C.ADDR_CHUNK) {
+    const total = addresses ? addresses.length : 1;                       // ← ADD
+    for (let i = 0; i < total; i += C.ADDR_CHUNK) {                       // ← CHANGED
       const part = addresses ? addresses.slice(i, i + C.ADDR_CHUNK) : null;
       const filter = part ? { address: part, topics, fromBlock: toHex(s), toBlock: toHex(e) }
                           : { topics, fromBlock: toHex(s), toBlock: toHex(e) };
