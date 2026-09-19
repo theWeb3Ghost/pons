@@ -29,7 +29,7 @@ jobs:
           INDEX_MAX_MINUTES: 240
           CHUNK: '9000'
           PROBE_PENDING: '0'
-          ACT_CHUNK: '2000'
+          ACT_CHUNK: '6000'
         run: node pons-index.mjs --backfill
 
       - name: Save data back to repo
