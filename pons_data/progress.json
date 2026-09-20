@@ -1,12 +1,12 @@
 {
   "phase": "time-capped",
-  "currentBlock": 67800146,
-  "headBlock": 67939369,
+  "currentBlock": 67942954,
+  "headBlock": 68083851,
   "pct": 99.66,
-  "launches": 559408,
+  "launches": 560879,
   "chunk": 9000,
   "blocksPerSec": 0,
   "etaMinutes": null,
-  "pid": 2278,
-  "updatedAt": "2026-09-20T12:29:53.158Z"
+  "pid": 2235,
+  "updatedAt": "2026-09-20T16:31:49.206Z"
 }
