@@ -1,13 +1,8 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════════════════
-   PONS INDEXER v3-final — exact ABIs from verified source (RH-scan).
-   Contracts: PonsV2LaunchFactory · PonsV2BondingCurve · PonsV2LauncherToken · PonsV2MemeHook
-   Zero deps · Node 18+ · crash-safe · multi-RPC w/ rate learner.
-
-   Tracks per launch: full metadata (from launch-tx input), curve economics, every
-   trade, creator earnings decomposed as
-     swept + rescued + pending, curve-side + hook-side
-   plus buyback comp, and TIME WINDOWS: gen/earn/vol in first 1h and 24h.
+   PONS INDEXER v4 — exact ABIs (verified source) · pairs registry · dev-buy
+   · earners-first enrichment · hook-gen currency guard · chunked slim save.
+   Zero deps (js-sha3 only) · Node 18+ · crash-safe · multi-RPC rate learner.
 
    node pons-index.mjs                     backfill → live tail (resumable)
    node pons-index.mjs --backfill          catch up, then exit
@@ -21,6 +16,7 @@ import http from 'node:http';
 import https from 'node:https';
 import readline from 'node:readline';
 import zlib from 'node:zlib';
+import jssha from 'js-sha3';
 
 try { for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
@@ -31,7 +27,7 @@ const C = {
   RPC_URLS: process.env.RPC_URLS || '',
   CHAIN_ID: Number(process.env.CHAIN_ID || 4663),
   FACTORY: (process.env.FACTORY || '0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e').toLowerCase(),
-  HOOK: '', ESCROW: '',                                    // auto-discovered from factory views
+  HOOK: '', ESCROW: '',
   WETH: (process.env.WETH_ADDRESSES || '').split(',').map(s => s.toLowerCase()).filter(Boolean),
   EXPLORER_API: (process.env.EXPLORER_API || '').replace(/\/$/, ''),
   START_BLOCK: Number(process.env.START_BLOCK || 1),
@@ -48,13 +44,13 @@ const C = {
   TRACK_WALLETS: process.env.TRACK_WALLETS !== '0',
   SAVE_TRADES: process.env.SAVE_TRADES === '1',
   PROBE_PENDING: process.env.PROBE_PENDING !== '0',
-  MAX_MINUTES: Number(process.env.INDEX_MAX_MINUTES || 0),   // 0 = no limit (0 is fine on a VPS)
+  MAX_MINUTES: Number(process.env.INDEX_MAX_MINUTES) || 0,
   SUPPLY_FETCH: process.env.SUPPLY_FETCH === '1',
+  ENRICH_PER_RUN: Number(process.env.ENRICH_PER_RUN) || 4000,
 };
 
 /* ── EXACT event signatures (from verified source) ──────────────────── */
 const EVENT_CANDIDATES = [
-  // PonsV2LaunchFactory
   'TokenLaunched(address indexed token,address indexed curve,address indexed deployer,address pairToken,uint256 launchConfigId,uint256 graduationThreshold)',
   'PoolGraduated(address indexed token,uint256 positionId,uint256 tokenAmount,uint256 pairTokenAmount)',
   'LaunchSwept(address indexed token,uint256 quoteOut,uint256 tokenOut)',
@@ -63,7 +59,6 @@ const EVENT_CANDIDATES = [
   'GraduationTokensPermanentlyLocked(address indexed token,uint256 amount)',
   'CreatorFeeRecipientUpdated(address indexed token,address indexed previousRecipient,address indexed newRecipient)',
   'BuybackEnabledUpdated(address indexed token,bool enabled,address indexed controller)',
-  // PonsV2BondingCurve
   'CurveBuy(address indexed buyer,address indexed recipient,uint256 quoteIn,uint256 tokensOut,uint256 fee,uint256 tax)',
   'CurveBuyRefunded(address indexed buyer,uint256 refund)',
   'CurveSell(address indexed seller,address indexed recipient,uint256 tokensIn,uint256 quoteOut,uint256 fee,uint256 tax)',
@@ -77,7 +72,6 @@ const EVENT_CANDIDATES = [
   'AutoGraduationFailed(address indexed token,uint256 gasRemaining)',
   'SnipeTaxExempted(address indexed account)',
   'SnipeTaxCharged(address indexed recipient,uint256 amount)',
-  // PonsV2MemeHook (post-graduation Uniswap V4 fees)
   'PoolRegistered(bytes32 indexed poolId,address memecoin,address quoteToken,address creator)',
   'HookFeeCollected(bytes32 indexed poolId,address currency,uint256 feeAmount,uint256 taxAmount)',
   'PoolFeesSwept(bytes32 indexed poolId,uint256 protocolAmount,uint256 buybackAmount,uint256 creatorAmount,uint256 tokensLocked)',
@@ -100,8 +94,6 @@ const padB32 = (h) => { try { return '0x' + BigInt(h).toString(16).padStart(64, 
 const ZERO_ADDR = '0x' + '0'.repeat(40);
 const replacer = (_k, v) => (typeof v === 'bigint' ? v.toString() : v);
 
-/* ── keccak256 (node's sha3 ≠ keccak) ───────────────────────────────── */
-import jssha from 'js-sha3';
 const keccak256 = (buf) => '0x' + jssha.keccak_256(Buffer.from(buf));
 if (keccak256(Buffer.alloc(0)) !== '0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470') {
   console.error('FATAL: keccak self-test failed'); process.exit(1);
@@ -149,8 +141,6 @@ function rawCall(ep, body) {
     req.write(body); req.end();
   });
 }
-
-
 const isLimitMsg = (m) => /rate|limit|429|too many|exceed|quota|capacity|backoff|spam|block range|tier|plan|-32600/i.test(m);
 function penalize(ep, detail) {
   const e = new Error(`limit @${ep.host}: ${detail}`);
@@ -219,7 +209,7 @@ function evFromSig(sig) {
     const indexed = p.includes('indexed'); p = p.replace('indexed', '').trim().split(/\s+/);
     return { type: p[0], name: p[1] || `a${i}`, indexed };
   }) : [];
-  const canonical = `${name}(${inputs.map(i => i.type).join(',')})`;   // ← THE FIX
+  const canonical = `${name}(${inputs.map(i => i.type).join(',')})`;
   return { name, inputs, sig: canonical, topic: keccak256(Buffer.from(canonical, 'utf8')) };
 }
 const EV = new Map();
@@ -237,7 +227,7 @@ function decodeLog(def, topics, dataHex) {
       const t = topics[k + 1] || '';
       out[inp.name] = inp.type === 'address' ? '0x' + t.slice(-40)
         : inp.type.startsWith('uint') || inp.type.startsWith('int') ? BigInt(t)
-        : inp.type === 'bool' ? BigInt(t) !== 0n : t;   // bytes32 → raw topic hex string
+        : inp.type === 'bool' ? BigInt(t) !== 0n : t;
     });
     let cur = 0;
     for (const inp of stk) {
@@ -248,7 +238,7 @@ function decodeLog(def, topics, dataHex) {
       } else if (inp.type === 'address') out[inp.name] = '0x' + w(cur * 32).subarray(12).toString('hex');
       else if (inp.type.startsWith('uint')) out[inp.name] = uintAt(cur * 32);
       else if (inp.type === 'bool') out[inp.name] = uintAt(cur * 32) !== 0n;
-      else out[inp.name] = '0x' + w(cur * 32).toString('hex');   // static bytes32 in data
+      else out[inp.name] = '0x' + w(cur * 32).toString('hex');
       cur++;
     }
   } catch {}
@@ -256,6 +246,7 @@ function decodeLog(def, topics, dataHex) {
 }
 
 /* ── storage / state / progress ─────────────────────────────────────── */
+fs.mkdirSync(C.DATA_DIR, { recursive: true });
 const P = {
   launches: path.join(C.DATA_DIR, 'pons_launches.jsonl'),
   events:   path.join(C.DATA_DIR, 'pons_events.jsonl'),
@@ -263,9 +254,10 @@ const P = {
   state:    path.join(C.DATA_DIR, 'state.json'),
   progress: path.join(C.DATA_DIR, 'progress.json'),
   anchors:  path.join(C.DATA_DIR, 'anchors.json'),
+  pairs:    path.join(C.DATA_DIR, 'pairs.json'),
 };
 const BIGS = ['creatorTaxBps','curveFeeBps','snipeTaxStartBps','snipeTaxSeconds','totalSupply',
-  'graduationThreshold','launchConfigId','buyVolume','sellVolume',
+  'graduationThreshold','launchConfigId','buyVolume','sellVolume','devBuyQuote',
   'gradQuote','gradTokens','gradSweptQuote','gradSweptTokens','rescuedQuote','lockedTokens',
   'sweptCurve','rescuedCreator','poolCreator','poolRescued','pendingCurve','pendingHook',
   'buybackQuote','buybackTokens','snipeTaxTotal',
@@ -278,6 +270,19 @@ const L = new Map(), curveToToken = new Map(), poolToToken = new Map(), poolQuot
 const saveState = () => { const t = `${P.state}.tmp`; fs.writeFileSync(t, JSON.stringify(STATE, replacer)); fs.renameSync(t, P.state); };
 const appendLines = (file, rows) => { if (rows.length) fs.appendFileSync(file, rows.map(r => JSON.stringify(r, replacer)).join('\n') + '\n'); };
 
+/* ── pair registry: discovers pair assets, PRESERVES your edited prices ── */
+let PAIRS = {}; try { PAIRS = JSON.parse(fs.readFileSync(P.pairs, 'utf8')); } catch {}
+function ensurePairs() {
+  let added = 0;
+  for (const l of L.values()) {
+    const a = l.pairAsset && l.pairAsset !== ZERO_ADDR ? l.pairAsset : null;
+    if (!a || PAIRS[a]) continue;
+    PAIRS[a] = { symbol: '', usd: 0, decimals: l.pairDecimals || 18 };
+    added++;
+  }
+  if (added) log(`[pairs] +${added} new pair assets discovered (edit usd in ${P.pairs})`);
+  const t = `${P.pairs}.tmp`; fs.writeFileSync(t, JSON.stringify(PAIRS, null, 2)); fs.renameSync(t, P.pairs);
+}
 
 function saveLaunches() {
   const t = `${P.launches}.tmp`;
@@ -300,8 +305,6 @@ function saveLaunches() {
   fs.renameSync(t, P.launches);
 }
 
-
-
 async function loadLaunches() {
   if (!fs.existsSync(P.launches) && fs.existsSync(P.launches + '.gz'))
     fs.writeFileSync(P.launches, zlib.gunzipSync(fs.readFileSync(P.launches + '.gz')));
@@ -312,7 +315,6 @@ async function loadLaunches() {
     let r; try { r = JSON.parse(line); } catch { continue; }
     for (const f of BIGS) r[f] = B(r[f]);
     r.earlyVolMin = (r.earlyVolMin || []).map(B); while (r.earlyVolMin.length < 30) r.earlyVolMin.push(0n);
-    // wallet counts survive restarts even though the arrays are dropped at save time
     r._bN  = Number(r.buyersN)  || (Array.isArray(r.buyers)  ? r.buyers.length  : 0);
     r._sN  = Number(r.sellersN) || (Array.isArray(r.sellers) ? r.sellers.length : 0);
     r._snN = Number(r.snipersN) || (Array.isArray(r.snipers) ? r.snipers.length : 0);
@@ -326,15 +328,16 @@ async function loadLaunches() {
   log(`[resume] ${L.size} launches loaded`);
 }
 
-
 const progSamples = [];
 function progress(phase, headBlock) {
-  const cur = Math.max(STATE.factoryBlock, 0), span = Math.max(1, headBlock - C.START_BLOCK);
+  const cur = Math.max(phase === 'activity' ? STATE.activityBlock : STATE.factoryBlock, 0);
+  const span = Math.max(1, headBlock - C.START_BLOCK);
   progSamples.push({ t: Date.now(), c: cur }); if (progSamples.length > 40) progSamples.shift();
   let bps = 0;
   if (progSamples.length > 4) { const a = progSamples[0], b = progSamples[progSamples.length - 1];
     bps = Math.max(0, (b.c - a.c) / ((b.t - a.t) / 1000)); }
   const p = { phase, currentBlock: cur, headBlock, pct: +(100 * (cur - C.START_BLOCK) / span).toFixed(2),
+    activityBlock: STATE.activityBlock, factoryBlock: STATE.factoryBlock,
     launches: L.size, chunk: STATE.chunk, blocksPerSec: +bps.toFixed(1),
     etaMinutes: bps > 0 ? +(Math.max(0, headBlock - cur) / bps / 60).toFixed(1) : null,
     pid: process.pid, updatedAt: new Date().toISOString() };
@@ -367,7 +370,7 @@ function tsOf(block) {
   return ks[hi] === ks[lo] ? t0 : Math.round(t0 + (t1 - t0) * (block - ks[lo]) / (ks[hi] - ks[lo]));
 }
 
-/* ── getLogs, adaptive chunking ─────────────────────────────────────── */
+/* ── getLogs, adaptive chunking, topic-only capable ─────────────────── */
 let okStreak = 0;
 async function fetchLogs(addresses, topics, from, to) {
   const out = [];
@@ -376,8 +379,8 @@ async function fetchLogs(addresses, topics, from, to) {
     const e = Math.min(s + STATE.chunk - 1, to);
     if ((s - from) % C.ANCHOR_EVERY < STATE.chunk) await Promise.all([ensureAnchor(s), ensureAnchor(e)]);
     let ok = true;
-    const total = addresses ? addresses.length : 1;                       // ← ADD
-    for (let i = 0; i < total; i += C.ADDR_CHUNK) {                       // ← CHANGED
+    const total = addresses ? addresses.length : 1;
+    for (let i = 0; i < total; i += C.ADDR_CHUNK) {
       const part = addresses ? addresses.slice(i, i + C.ADDR_CHUNK) : null;
       const filter = part ? { address: part, topics, fromBlock: toHex(s), toBlock: toHex(e) }
                           : { topics, fromBlock: toHex(s), toBlock: toHex(e) };
@@ -410,14 +413,7 @@ const SELS = {
   memeHook: sel('memeHook()'), feeEscrow: sel('feeEscrow()'), buybackVault: sel('buybackVault()'), locker: sel('locker()'),
 };
 
-/* ── launch-tx metadata: TokenParams from input data ──────────────────
-   Head words (after 4-byte selector), word k at byte 4+32k:
-     w0 paramsOffset · w1 configId · w2 pairToken
-     launchToken 4-arg:      w3 = exemptions[] offset
-     launchTokenFor 5-arg:   w3 = originalDeployer · w4 = exemptions[] offset
-   Params tuple (base P0, offsets rel. P0):
-     0 name · 32 symbol · 64 logo · 96 description · 128 socialsOffset
-     160 feeRecipient · 192 creatorTaxBps · 224 buybackEnabled · 256 econ · 288 salt */
+/* ── launch-tx metadata: TokenParams from input data ────────────────── */
 async function fetchLaunchTxMeta(txHash) {
   try {
     const tx = await rpc('eth_getTransactionByHash', [txHash]);
@@ -451,7 +447,7 @@ async function fetchLaunchTxMeta(txHash) {
     return out;
   } catch { return null; }
 }
-function decodeLaunchedToken(ret) {   // getLaunchedToken → 15 static words
+function decodeLaunchedToken(ret) {
   try {
     const d = hx(ret); if (d.length < 480) return null;
     const w = (i) => { const s = d.subarray(i * 32, i * 32 + 32).toString('hex'); return s ? BigInt('0x' + s) : 0n; };
@@ -468,7 +464,7 @@ function decodeOneString(ret) {
     return d.subarray(off + 32, off + 32 + Math.min(len, 4096)).toString('utf8');
   } catch { return ''; }
 }
-function decodeSocials5(ret) {        // socials() → 5 strings (heads: 160, then offsets rel. base)
+function decodeSocials5(ret) {
   try {
     const d = hx(ret);
     const w = (o) => Number(BigInt('0x' + (d.subarray(o, o + 32).toString('hex') || '0')));
@@ -480,7 +476,7 @@ function decodeSocials5(ret) {        // socials() → 5 strings (heads: 160, th
   } catch { return null; }
 }
 
-/* ── enrichment ─────────────────────────────────────────────────────── */
+/* ── enrichment (earners prioritized by backfill; generic drain here) ── */
 const enrichQueue = [];
 async function drainEnrich(maxItems = Infinity) {
   let n = 0;
@@ -514,7 +510,7 @@ async function drainEnrich(maxItems = Infinity) {
         if (g.graduationThreshold) l.graduationThreshold = g.graduationThreshold;
         l.poolFee = g.poolFee; l.tickSpacing = g.tickSpacing; l.phase = g.phase;
       }
-      if (l.curve) {   // exact per-curve economics (immutables → one-time)
+      if (l.curve) {
         if (!l.creatorTaxBps) l.creatorTaxBps = await callUint(l.curve, 'creatorTaxBps()');
         if (!l.curveFeeBps) l.curveFeeBps = await callUint(l.curve, 'feeBps()');
         if (!l.protocolShareBps) l.protocolShareBps = await callUint(l.curve, 'protocolFeeShareBps()');
@@ -524,13 +520,17 @@ async function drainEnrich(maxItems = Infinity) {
       }
       if (!l.name)   l.name   = decodeOneString(await ethCall(token, sel('name()')))   || l.name;
       if (!l.symbol) l.symbol = decodeOneString(await ethCall(token, sel('symbol()'))) || l.symbol;
-      if (!l.twitter && !l.description) {   // token-view metadata fallback
+      if (!l.twitter && !l.description) {
         const soc = decodeSocials5(await ethCall(token, SELS.socials));
         if (soc) { [l.twitter, l.telegram, l.discord, l.website, l.farcaster] = soc; }
         l.description = decodeOneString(await ethCall(token, SELS.description)) || l.description;
         l.image = decodeOneString(await ethCall(token, SELS.logo)) || l.image;
       }
-      if (l.pairAsset && l.pairAsset !== ZERO_ADDR && !l.ethPair && l.pairDecimals === 18) l.pairDecimals = await decimalsOf(l.pairAsset);
+      if (l.pairAsset && l.pairAsset !== ZERO_ADDR && !l.ethPair) {
+        l.pairDecimals = await decimalsOf(l.pairAsset);
+        if (!PAIRS[l.pairAsset]) { PAIRS[l.pairAsset] = { symbol: '', usd: 0, decimals: l.pairDecimals }; }
+        else PAIRS[l.pairAsset].decimals = l.pairDecimals;
+      }
       if (C.SUPPLY_FETCH && !(l.totalSupply > 0n)) l.totalSupply = await callUint(token, 'totalSupply()');
       l.enriched = true;
     } catch {}
@@ -543,14 +543,14 @@ function wOf(l, ts) { const dt = ts - l.launchTs; return dt <= 3600 ? 3 : dt <= 
 function addW(l, base, amt, ts) { const w = wOf(l, ts);
   if (w >= 2) l[base + '24h'] = (l[base + '24h'] ?? 0n) + amt;
   if (w === 3) l[base + '1h'] = (l[base + '1h'] ?? 0n) + amt; }
-function genCreator(l, fee, tax) {   // exact per contract: tax→creator in full; fee→protocol cut then creator/buyback split
+function genCreator(l, fee, tax) {
   const ps = l.protocolShareBps || 3000n, bb = l.buybackBurnBps || 5000n;
   let fc = fee - (fee * ps) / 10000n;
   if (l.buybackEnabled) fc -= (fc * bb) / 10000n;
   return tax + (fc > 0n ? fc : 0n);
 }
 
-/* ── exact pending-creator probe (curve state + hook mappings) ──────── */
+/* ── exact pending-creator probe ────────────────────────────────────── */
 async function probePending(l) {
   try {
     if (l.curve && !l.graduated) {
@@ -588,7 +588,7 @@ function ensureRow(token) {
       launchBlock: 0, launchTs: 0, launchTx: '', metaFromTx: false, enriched: false,
       buyVolume: 0n, sellVolume: 0n, buys: 0, sells: 0, buyers: new Set(), sellers: new Set(),
       firstTradeTs: 0, lastTradeTs: 0, lastTradeBlock: 0, earlyVolMin: Array(30).fill(0n),
-      vol1h: 0n, trades1h: 0,
+      vol1h: 0n, trades1h: 0, devBuyQuote: 0n,
       peakPrice: 0, lastPrice: 0, peakBlock: 0,
       graduated: false, gradBlock: 0, gradTs: 0, gradFailed: false, poolId: '',
       gradQuote: 0n, gradTokens: 0n, gradSweptQuote: 0n, gradSweptTokens: 0n, rescuedQuote: 0n, lockedTokens: 0n,
@@ -601,9 +601,6 @@ function ensureRow(token) {
   }
   return l;
 }
-
-
-
 const topicAddr = (t) => (t && t.length === 66 ? '0x' + t.slice(-40) : undefined);
 const byCurve = (lg) => L.get(curveToToken.get(addr(lg.address)) || '');
 const byPool = (pid) => L.get(poolToToken.get(String(pid ?? '').toLowerCase()) || '');
@@ -620,21 +617,21 @@ function onLaunch(a, lg) {
   if (a.graduationThreshold !== undefined) l.graduationThreshold = B(a.graduationThreshold);
   if (a.launchConfigId !== undefined) l.launchConfigId = B(a.launchConfigId);
   l.launchBlock = Number(lg.blockNumber); l.launchTx = lg.transactionHash || ''; l.launchTs = tsOf(l.launchBlock);
-  enrichQueue.push(token);
 }
 async function onTrade(name, a, lg, ts) {
   const l = byCurve(lg); if (!l) return;
-  if (!l.protocolShareBps && l.curve) {   // lazy policy fetch so gen is exact from trade #1
+  if (!l.protocolShareBps && l.curve) {
     l.protocolShareBps = await callUint(l.curve, 'protocolFeeShareBps()');
     l.buybackBurnBps = await callUint(l.curve, 'buybackBurnBps()');
   }
   const isBuy = name === 'CurveBuy';
   const fee = B(a.fee), tax = B(a.tax);
-  const q = isBuy ? B(a.quoteIn) : B(a.quoteOut) + fee + tax;   // gross quote turnover
+  const q = isBuy ? B(a.quoteIn) : B(a.quoteOut) + fee + tax;
   const tok = isBuy ? B(a.tokensOut) : B(a.tokensIn);
   if (isBuy) { l.buys++; l.buyVolume += q; } else { l.sells++; l.sellVolume += q; }
   const trader = addr(a.buyer || a.seller);
   if (C.TRACK_WALLETS && trader) (isBuy ? l.buyers : l.sellers).add(trader);
+  if (trader && (trader === l.creator || trader === addr(l.feeRecipient))) l.devBuyQuote += q;   // ← developer buy
   if (!l.firstTradeTs) l.firstTradeTs = ts;
   l.lastTradeTs = ts; l.lastTradeBlock = Number(lg.blockNumber);
   const m = Math.floor((ts - l.launchTs) / 60);
@@ -698,11 +695,13 @@ async function processLogs(logs) {
         if (!l.graduated) { l.graduated = true; l.gradBlock = Number(lg.blockNumber); l.gradTs = ts; } }
     }
     else if (n === 'hookfeecollected') { const l = byPool(a.poolId); if (l) {
-      const savePS = l.protocolShareBps, saveBB = l.buybackBurnBps;
-      l.protocolShareBps = C.HOOK_PS || 3000n; l.buybackBurnBps = C.HOOK_BB || 5000n;
-      const gen = genCreator(l, B(a.feeAmount), B(a.taxAmount));
-      l.protocolShareBps = savePS; l.buybackBurnBps = saveBB;
-      l.genTotal += gen; addW(l, 'gen', gen, ts); } }
+      const q = poolQuote.get(String(a.poolId).toLowerCase()) || ZERO_ADDR;
+      if (addr(a.currency) === q) {                    // ← only quote-denominated fees count toward gen
+        const savePS = l.protocolShareBps, saveBB = l.buybackBurnBps;
+        l.protocolShareBps = C.HOOK_PS || 3000n; l.buybackBurnBps = C.HOOK_BB || 5000n;
+        const gen = genCreator(l, B(a.feeAmount), B(a.taxAmount));
+        l.protocolShareBps = savePS; l.buybackBurnBps = saveBB;
+        l.genTotal += gen; addW(l, 'gen', gen, ts); } } }
     else if (n === 'poolfeesswept') { const l = byPool(a.poolId); if (l) {
       const amt = B(a.creatorAmount); l.poolCreator += amt; addW(l, 'earn', amt, ts);
       l.buybackQuote += B(a.buybackAmount); l.buybackTokens += B(a.tokensLocked); addW(l, 'bb', B(a.buybackAmount), ts); } }
@@ -721,7 +720,6 @@ async function processLogs(logs) {
     raws.push({ ev: def.name, block: Number(lg.blockNumber), ts, tx: lg.transactionHash, src, args: a });
   }
   appendLines(P.events, raws);
-   // metadata deferred — discovered launches are enriched after the pass   // cap per window; the rest trails behind
   return raws.length;
 }
 async function scanFactory(a, b) { return processLogs(await fetchLogs([C.FACTORY], null, a, b)); }
@@ -737,13 +735,13 @@ function tick(force, headBlock, phase) {
   const now = Date.now();
   if (force || now - lastProg > 5000) { lastProg = now; const p = progress(phase, headBlock);
     process.stdout.write(`\r${phase} ${p.pct}% · blk ${p.currentBlock}/${p.headBlock} · ${p.blocksPerSec} blk/s · ETA ${p.etaMinutes ?? '—'}m · ${p.launches} launches   `); }
-  if (now - lastAnchorSave > 60000) { lastAnchorSave = now; persistAnchors(); saveState(); saveRpcState(); }
+  if (now - lastAnchorSave > 60000) { lastAnchorSave = now; persistAnchors(); saveState(); saveRpcState(); ensurePairs(); }
   if (now - lastFullSave > 60000) { lastFullSave = now; saveLaunches(); }
 }
 
 async function backfill() {
-  const t0 = Date.now();                                                        // ← NEW
-  const outOfTime = () => C.MAX_MINUTES > 0 && (Date.now() - t0) / 60000 > C.MAX_MINUTES;  // ← NEW
+  const t0 = Date.now();
+  const outOfTime = () => C.MAX_MINUTES > 0 && (Date.now() - t0) / 60000 > C.MAX_MINUTES;
   const h0 = await head();
   log(`head=${h0} · resume factory@${STATE.factoryBlock + 1} activity@${STATE.activityBlock + 1} · chunk=${STATE.chunk}`);
   if (!STATE.satsFound) {
@@ -764,7 +762,7 @@ async function backfill() {
     } catch (e) { log('[auto] satellite discovery failed:', String(e).slice(0, 90)); }
   }
   for (;;) {
-    if (outOfTime()) { log('[time] cap reached — saving & exiting; next run resumes from checkpoint'); break; }   // ← NEW
+    if (outOfTime()) { log('[time] cap reached — saving & exiting; next run resumes from checkpoint'); break; }
     const h = (await head()) - C.CONFIRMATIONS;
     if (STATE.factoryBlock >= h - 100) break;
     const to = Math.min(STATE.factoryBlock + STATE.chunk, h);
@@ -774,31 +772,35 @@ async function backfill() {
   }
   saveState(); console.log('');
   while (STATE.activityBlock < STATE.factoryBlock) {
-    if (outOfTime()) { log('[time] cap reached — saving & exiting; next run resumes from checkpoint'); break; }   // ← NEW
+    if (outOfTime()) { log('[time] cap reached — saving & exiting; next run resumes from checkpoint'); break; }
     const to = Math.min(STATE.activityBlock + (C.ACT_CHUNK || STATE.chunk), STATE.factoryBlock);
     const n = await scanActivity(STATE.activityBlock + 1, to);
     STATE.activityBlock = to; tick(false, STATE.factoryBlock, 'activity');
     if (n) process.stdout.write(`(+${n})`);
   }
-  saveLaunches(); saveState(); persistAnchors();   // BANK FIRST — from here on, the run cannot be lost
-  if (!outOfTime()) {                              // garnish only if time remains
-    for (const l of L.values()) if (!l.enriched || !l.metaFromTx) enrichQueue.push(l.token);
-    await drainEnrich(1000);
-    saveLaunches(); saveState();
-  }                       // bank again after garnish
-  if (C.PROBE_PENDING && !outOfTime()) {                                        // ← NEW (skip probe when time's up)
+  saveLaunches(); saveState(); persistAnchors(); ensurePairs();   // BANK FIRST
+  if (!outOfTime()) {
+    // earners-first enrichment: highest creator earnings get metadata first
+    const needy = [...L.values()].filter(l => (!l.enriched || !l.metaFromTx) && l.launchTx);
+    needy.sort((a, b) => Number(b.sweptCurve + b.rescuedCreator + b.poolCreator + b.poolRescued)
+                       - Number(a.sweptCurve + a.rescuedCreator + a.poolCreator + a.poolRescued));
+    for (const l of needy) enrichQueue.push(l.token);
+    if (enrichQueue.length) log(`[enrich] ${enrichQueue.length} pending · earners-first · cap ${C.ENRICH_PER_RUN}/run`);
+    await drainEnrich(C.ENRICH_PER_RUN);
+    saveLaunches(); saveState(); ensurePairs();
+  }
+  if (C.PROBE_PENDING && !outOfTime()) {
     let i = 0;
     for (const l of L.values()) { await probePending(l); if (++i % 200 === 0) { log(`[pending] ${i}/${L.size}`); saveLaunches(); } }
   }
   const chk = [...L.values()].filter(l => l.genTotal > 0n)
     .map(l => Number(l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook) / Number(l.genTotal)).sort((a, b) => a - b);
   if (chk.length) log(`[check] generated-vs-credited ratio: median ${chk[chk.length >> 1].toFixed(2)} over ${chk.length} earners (≈1 = consistent · >1.3 or <0.7 = investigate)`);
-  saveLaunches(); persistAnchors(); saveState(); saveRpcState();
-  progress(outOfTime() ? 'time-capped' : 'backfill-done', await head());        // ← NEW (honest label)
+  saveLaunches(); persistAnchors(); saveState(); saveRpcState(); ensurePairs();
+  progress(outOfTime() ? 'time-capped' : 'backfill-done', await head());
   const totals = [...L.values()].reduce((s, l) => s + l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook, 0n);
   console.log(`\n[done] ${L.size} launches · protocol-wide creator earnings: ${Number(totals) / 1e18} (quote units) → ${P.launches}`);
 }
-
 
 async function live() {
   log(`[live] tail every ${C.POLL_MS}ms — Ctrl-C anytime, resume is automatic`);
@@ -890,9 +892,10 @@ async function timeline(tokenArg) {
 /* ── main ───────────────────────────────────────────────────────────── */
 const argv = new Set(process.argv.slice(2));
 const target = process.argv.slice(2).find(a => /^0x[0-9a-f]{40}$/i.test(a));
-process.on('SIGINT', async () => { console.log('\n[shutdown] flushing…'); try { saveLaunches(); saveState(); persistAnchors(); saveRpcState(); } catch {} process.exit(0); });
+process.on('SIGINT', async () => { console.log('\n[shutdown] flushing…'); try { saveLaunches(); saveState(); persistAnchors(); saveRpcState(); ensurePairs(); } catch {} process.exit(0); });
 await bootChainCheck();
 await loadLaunches();
+ensurePairs();
 if (argv.has('--discover')) await discover(target);
 else if (argv.has('--find-start')) await findStart();
 else if (argv.has('--timeline') && target) await timeline(target);

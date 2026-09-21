@@ -1,23 +1,20 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════════════════
-   PONS PROFILER v3-final — safe to run WHILE pons-index.mjs runs (atomic reads).
-   Ranks by creator earnings for a WINDOW (all-time comp | fees generated in
-   first 1h | first 24h), then mechanically profiles the top slice: every
-   letter, word, bucket, boolean, pair → "% of winners vs % of rest".
+   PONS PROFILER v4 — USD-normalized (all pairs) · tier banding · windows.
+   Reads pons_data/pairs.json for pair prices (usd:0 = unpriced → excluded,
+   reported, never lost). ETH_USD env for the native pair.
 
-   WINDOW=all  TOP_PCT=1  node pons-profile.mjs     # all-time top 1%
-   WINDOW=1h   TOP_PCT=5  node pons-profile.mjs     # first-hour champions, top 5%
-   WINDOW=24h  TOP_PCT=1  node pons-profile.mjs
-   PCTS=0.1,1,5,10 node pons-profile.mjs            # mine several slices → CSV
-   node pons-profile.mjs --top 10                   # + narratives for top 10
-   node pons-profile.mjs --explain 0xTOKEN          # one token's math story
-   node pons-profile.mjs --pair all                 # include non-native pairs
+   WINDOW=all  TOP_PCT=1  node pons-profile.mjs      # all-time, USD
+   WINDOW=1h   TOP_PCT=5  node pons-profile.mjs      # first-hour champions
+   PCTS=0.1,1,5,10 node pons-profile.mjs
+   TIERS=10 node pons-profile.mjs                    # 10-band fee ladder
+   node pons-profile.mjs --top 10
+   node pons-profile.mjs --explain 0xTOKEN
    ═══════════════════════════════════════════════════════════════════════════ */
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import zlib from 'node:zlib';
-
 
 try { for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
   const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
@@ -25,17 +22,16 @@ try { for (const line of fs.readFileSync('.env', 'utf8').split('\n')) {
 } } catch {}
 
 const DATA = process.env.DATA_DIR || './pons_data';
-const WINDOW = (process.env.WINDOW || 'all').toLowerCase();      // all | 1h | 24h
+const WINDOW = (process.env.WINDOW || 'all').toLowerCase();
 const TOP_PCT = Number(process.env.TOP_PCT || 1);
 const PCTS = (process.env.PCTS || String(TOP_PCT)).split(',').map(Number).filter(x => x > 0 && x < 100);
 const MIN_SUP = Number(process.env.MIN_SUPPORT || 5);
 const MIN_REST = Number(process.env.MIN_REST || 8);
 const SORT = (process.env.SORT || 'lift').toLowerCase();
 const SUPPLY_GUESS = Number(process.env.SUPPLY_GUESS || 1e9);
-const PAIR_ALL = process.argv.includes('--pair') && process.argv.includes('all');
+const ETH_USD = Number(process.env.ETH_USD || 2500);
+const TIERS = Number(process.env.TIERS || (process.argv.includes('--tiers') ? 10 : 0));
 const topN = (() => { const i = process.argv.indexOf('--top'); return i > -1 ? Number(process.argv[i + 1]) : 0; })();
-
-
 
 const med = (a) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y), m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -52,6 +48,10 @@ const pctS = (x) => Number.isFinite(x) ? (100 * x).toFixed(0) + '%' : '—';
 const pS = (p) => (p < 1e-4 ? p.toExponential(1) : p.toFixed(4));
 const liftS = (l) => !Number.isFinite(l) ? 'new' : '×' + l.toFixed(2);
 
+/* ── pair prices (edit pairs.json to fill; indexer appends new pairs) ── */
+let PAIRS = {}; try { PAIRS = JSON.parse(fs.readFileSync(path.join(DATA, 'pairs.json'), 'utf8')); } catch {}
+const priceOf = (r) => (r.ethPair !== false ? ETH_USD : Number(PAIRS[r.pairAsset]?.usd || 0));
+
 /* ── load ───────────────────────────────────────────────────────────── */
 async function load() {
   let file = path.join(DATA, 'pons_launches.jsonl');
@@ -61,7 +61,7 @@ async function load() {
   const stream = file.endsWith('.gz') ? raw.pipe(zlib.createGunzip()) : raw;
   const rows = [];
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-for await (const line of rl) {
+  for await (const line of rl) {
     if (!line) continue;
     let r; try { r = JSON.parse(line); } catch { continue; }
     const pd = Number(r.pairDecimals ?? 18), hu = (v) => Number(v ?? 0) / 10 ** pd;
@@ -78,6 +78,7 @@ for await (const line of rl) {
       tax: Number(r.creatorTaxBps ?? 0), curveFee: Number(r.curveFeeBps ?? 0),
       reward, comp, vol, realizedBps: 0,
       trades: (r.buys || 0) + (r.sells || 0), buyers: Number(r.buyersN ?? (Array.isArray(r.buyers) ? r.buyers.length : 0)),
+      devBuy: hu(r.devBuyQuote ?? 0),
       vol1m: early[0] || 0, vol5m: early.slice(0, 5).reduce((s, x) => s + x, 0), vol30m: early.reduce((s, x) => s + x, 0),
       shareFirst30: vol > 0 ? early.reduce((s, x) => s + x, 0) / vol : 0,
       graduated: !!r.graduated, tGradH: r.gradTs && r.launchTs ? (r.gradTs - r.launchTs) / 3600 : NaN,
@@ -102,24 +103,41 @@ for await (const line of rl) {
   }
   return rows;
 }
-const all = (await load()).filter(r => PAIR_ALL || r.ethPair);
+const all = await load();
 
-/* WINDOW switch — rw/vw feed every downstream stat */
+/* ── USD normalization: every pair, one leaderboard ──────────────────── */
 for (const r of all) {
-  if (WINDOW === '1h')       { r.rw = r.gen1h;  r.vw = r.vol1h; }
-  else if (WINDOW === '24h') { r.rw = r.gen24h; r.vw = r.vol; }
-  else                       { r.rw = r.comp || r.reward; r.vw = r.vol; }
+  r.priceUsd = priceOf(r);
+  r.priced = r.priceUsd > 0;
+  r.usdReward = r.reward * r.priceUsd;
+  r.usdComp = r.comp * r.priceUsd;
+  r.usdVol = r.vol * r.priceUsd;
+}
+const priced = all.filter(r => r.priced);
+const unpriced = all.filter(r => !r.priced);
+if (unpriced.length) {
+  const byPair = new Map();
+  for (const r of unpriced) { const g = byPair.get(r.pair) || { n: 0, vol: 0 }; g.n++; g.vol += r.vol; byPair.set(r.pair, g); }
+  console.log(`⚠ ${unpriced.length} launches on UNPRICED pairs (excluded from ranking — fill usd in pons_data/pairs.json):`);
+  console.table([...byPair.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 15)
+    .map(([pair, g]) => ({ pair: pair.slice(0, 14) + '…', launches: g.n, rawVol: +g.vol.toFixed(1) })));
+}
+
+/* ── WINDOW switch (USD) ─────────────────────────────────────────────── */
+for (const r of priced) {
+  if (WINDOW === '1h')       { r.rw = r.gen1h * r.priceUsd;  r.vw = r.vol1h * r.priceUsd; }
+  else if (WINDOW === '24h') { r.rw = r.gen24h * r.priceUsd; r.vw = r.vol * r.priceUsd; }
+  else                       { r.rw = r.usdComp;             r.vw = r.usdVol; }
   r.realizedBps = r.vw > 0 ? r.rw / r.vw * 1e4 : 0;
 }
-const traded = all.filter(r => r.vw > 0);
+const traded = priced.filter(r => r.vw > 0);
 const rewarded = traded.filter(r => r.rw > 0).sort((a, b) => b.rw - a.rw);
 const N = rewarded.length;
 if (N < 20) { console.error(`only ${N} earning launches in this window — need more history`); process.exit(1); }
-console.log(`WINDOW=${WINDOW} (${WINDOW === 'all' ? 'all-time comp = earnings+buyback' : `fees GENERATED in first ${WINDOW}`}) · ` +
-  `traded=${traded.length} · earners=${N} · graveyard=${(100 * (1 - N / Math.max(traded.length, 1))).toFixed(0)}%` +
-  (PAIR_ALL ? ' · [pair=all]' : ''));
+console.log(`WINDOW=${WINDOW} · currency=USD (ETH_USD=${ETH_USD}) · dataset=${all.length} · priced=${priced.length} · ` +
+  `traded=${traded.length} · earners=${N} · graveyard=${(100 * (1 - N / Math.max(traded.length, 1))).toFixed(0)}%`);
 
-/* ── TRAIT CATALOG (enumerated, not hand-picked) ────────────────────── */
+/* ── TRAIT CATALOG ───────────────────────────────────────────────────── */
 const STOP = new Set('the and for with this that you your our are was has have its not all out get one two new who why how what when coin token meme official just about more than then them they from will can now'.split(' '));
 const nameWords = (r) => new Set(((r.name + ' ' + r.symbol).toLowerCase().match(/[a-z]{3,}/g) || []).filter(w => !STOP.has(w)));
 const descWords = (r) => new Set(((r.desc || '').toLowerCase().match(/[a-z]{4,}/g) || []).filter(w => !STOP.has(w)));
@@ -149,6 +167,7 @@ function buildTraits() {
   b('war', 'snipers 1-3', 1, 3, r => r.snipers);
   b('war', 'snipers 4+', 4, 999, r => r.snipers);
   add('war', 'declared snipe exemptions', r => r.snipeExempt > 0);
+  b('founder', 'dev buy > 0', 0.0001, 1e12, r => r.devBuy);
   b('name length', 'name 1-6 chars', 1, 6, r => r.nameLen);
   b('name length', 'name 7-10 chars', 7, 10, r => r.nameLen);
   b('name length', 'name 11-14 chars', 11, 14, r => r.nameLen);
@@ -249,13 +268,15 @@ function explain(r) {
 token      ${r.token}
 creator    ${r.creator}
 fee wallet ${r.feeRecipient}   tx ${r.tx}
-window     rw=${r.rw.toFixed(4)} on vw=${r.vw.toFixed(1)} (${WINDOW}) · realized ${r.realizedBps.toFixed(1)} bps
-money      earnings ${r.reward.toFixed(4)} · buyback ${r.buybackVal.toFixed(4)} → comp ${r.comp.toFixed(4)} · pending ${r.pending.toFixed(4)}
-windows    gen1h ${r.gen1h.toFixed(3)} (earn ${r.earn1h.toFixed(3)}, vol ${r.vol1h.toFixed(1)}, trades ${r.trades1h}) · gen24h ${r.gen24h.toFixed(3)} (earn ${r.earn24h.toFixed(3)})
+pair       ${r.ethPair ? 'native ETH' : r.pair} @ $${r.priceUsd}
+window     rw=$${r.rw.toFixed(2)} on vw=$${r.vw.toFixed(1)} (${WINDOW}) · realized ${r.realizedBps.toFixed(1)} bps
+money      earnings $${r.usdReward.toFixed(2)} (${r.reward.toFixed(4)} raw) · buyback $${(r.buybackVal * r.priceUsd).toFixed(2)} → comp $${r.usdComp.toFixed(2)} · pending $${(r.pending * r.priceUsd).toFixed(2)}
+devbuy     $${(r.devBuy * r.priceUsd).toFixed(2)} (${r.devBuy.toFixed(4)} raw)
+windows    gen1h $${(r.gen1h * r.priceUsd).toFixed(2)} (earn $${(r.earn1h * r.priceUsd).toFixed(2)}, vol $${(r.vol1h * r.priceUsd).toFixed(1)}, trades ${r.trades1h}) · gen24h $${(r.gen24h * r.priceUsd).toFixed(2)} (earn $${(r.earn24h * r.priceUsd).toFixed(2)})
 rank       #${i + 1} of ${N} · top ${(((i + 1) / N) * 100).toFixed(2)}%
-shape      trades ${r.trades} · buyers ${r.buyers} · vol@1m ${r.vol1m.toFixed(2)} · @5m ${r.vol5m.toFixed(2)} · @30m ${r.vol30m.toFixed(2)}
+shape      trades ${r.trades} · buyers ${r.buyers} · vol@1m $${(r.vol1m * r.priceUsd).toFixed(2)} · @5m $${(r.vol5m * r.priceUsd).toFixed(2)} · @30m $${(r.vol30m * r.priceUsd).toFixed(2)}
            first-30m = ${(r.shareFirst30 * 100).toFixed(0)}% of lifetime · life ${r.lifeH.toFixed(1)}h${r.graduated ? ` · graduated ${r.tGradH.toFixed(2)}h` : ' · never graduated'}
-war        snipers ${r.snipers} · snipe tax collected ${r.snipeTaxQ.toFixed(4)} · declared exemptions ${r.snipeExempt}
+war        snipers ${r.snipers} · snipe tax $${(r.snipeTaxQ * r.priceUsd).toFixed(2)} · declared exemptions ${r.snipeExempt}
 settings   tax ${r.tax} bps + curve fee ${r.curveFee} bps · buyback ${r.usedBuyback ? 'ON' : 'off'}
 meta       socials ${r.socials} (tw ${r.hasTw} tg ${r.hasTg} dc ${r.hasDisc} web ${r.hasWeb}) · img ${r.hasImg} · desc ${r.descLen} chars
            name ${r.nameLen} · sym ${r.symLen} · hour ${r.hour}UTC (${r.month})${r.supplyEst ? ' · supply≈guess' : ''}`);
@@ -263,22 +284,48 @@ meta       socials ${r.socials} (tw ${r.hasTw} tg ${r.hasTg} dc ${r.hasDisc} web
 for (const p of PCTS) {
   const k = Math.max(1, Math.round(N * p / 100));
   const winners = rewarded.slice(0, k), rest = rewarded.slice(k);
-  console.log(`\n════ SLICE top ${p}% → ${k} tokens (rw ≥ ${winners.at(-1)?.rw.toFixed(4)}) vs ${rest.length} rest ════`);
+  console.log(`\n════ SLICE top ${p}% → ${k} tokens (rw ≥ $${winners.at(-1)?.rw.toFixed(2)}) vs ${rest.length} rest ════`);
   const res = mine(winners, rest, traits);
   const tests = res.single.length + res.pairs.length;
   console.log(`(${tests} traits tested · Bonferroni guard: act on p < ${(0.05 / Math.max(tests, 1)).toFixed(5)})`);
   show(res, `top ${p}%`);
   if (p === PCTS[0]) {
-    console.log(`\n── RANKING: top ${Math.min(k, 20)} by rw (WINDOW=${WINDOW}) ──`);
+    console.log(`\n── RANKING: top ${Math.min(k, 20)} by rw USD (WINDOW=${WINDOW}) ──`);
     console.table(winners.slice(0, 20).map((r, i) => ({ '#': i + 1, symbol: r.symbol || '?',
-      rw: +r.rw.toFixed(4), gen1h: +r.gen1h.toFixed(3), earn1h: +r.earn1h.toFixed(3),
-      allTimeEarn: +r.reward.toFixed(3), pending: +r.pending.toFixed(3),
-      buyback: +r.buybackVal.toFixed(2), vol: +r.vol.toFixed(0), vol1h: +r.vol1h.toFixed(1),
+      rwUsd: +r.rw.toFixed(2), allTimeUsd: +r.usdComp.toFixed(2), earnRaw: +r.reward.toFixed(3),
+      pendingUsd: +(r.pending * r.priceUsd).toFixed(2), devBuyUsd: +(r.devBuy * r.priceUsd).toFixed(2),
+      volUsd: +r.usdVol.toFixed(0), vol1hUsd: +(r.vol1h * r.priceUsd).toFixed(1),
       bps: +r.realizedBps.toFixed(1), trades: r.trades, buyers: r.buyers, snipers: r.snipers,
       grad: r.graduated ? '✓' : '', hour: r.hour, token: r.token.slice(0, 10) + '…' })));
   }
   if (topN > 0 && p === PCTS[0]) for (const r of winners.slice(0, topN)) explain(r);
   for (const r of [...res.single, ...res.pairs]) allResults.push({ slicePct: p, ...r, winPct: +r.winPct.toFixed(4), restPct: +r.restPct.toFixed(4) });
+}
+
+/* ── TIER BANDING: earners graded into bands by fee payout ──────────── */
+if (TIERS > 1) {
+  const k = Math.max(1, Math.floor(N / TIERS));
+  const bands = [];
+  for (let t = 0; t < TIERS; t++) bands.push(rewarded.slice((TIERS - 1 - t) * k, (TIERS - t) * k));
+  const tierRows = traits.map(tr => {
+    const pcts = bands.map(b => (b.length ? countIf(b, tr.test) / b.length : 0));
+    const half = Math.floor(TIERS / 2);
+    const top = pcts.slice(-half).reduce((s, x) => s + x, 0) / half;
+    const bot = pcts.slice(0, half).reduce((s, x) => s + x, 0) / half;
+    return { trait: tr.id, gradient: +(100 * (top - bot)).toFixed(1), pcts };
+  }).sort((a, b) => b.gradient - a.gradient);
+  const fmt = r => ({ trait: r.trait, gradient: r.gradient,
+    ...Object.fromEntries(r.pcts.map((p, i) => [`T${i + 1}`, (100 * p).toFixed(0) + '%'])) });
+  console.log(`\n── TIER LADDER: traits that SCALE with fee tier (T1=lowest earners … T${TIERS}=highest) ──`);
+  console.table(tierRows.slice(0, 25).map(fmt));
+  console.log('── traits that FADE as earnings rise ──');
+  console.table(tierRows.slice(-10).map(fmt));
+  const q2 = v => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  fs.writeFileSync(path.join(DATA, `pons_tiers_${WINDOW}.csv`),
+    ['trait','gradient', ...bands.map((_, i) => `tier${i + 1}_pct`)]
+      .concat(tierRows.map(r => [q2(r.trait), r.gradient, ...r.pcts.map(p => (100 * p).toFixed(1))].join(',')))
+      .join('\n') + '\n');
+  console.log(`wrote pons_tiers_${WINDOW}.csv`);
 }
 
 /* ── outputs ────────────────────────────────────────────────────────── */
@@ -289,8 +336,8 @@ fs.writeFileSync(path.join(DATA, 'pons_traits.csv'),
       Number.isFinite(r.lift) ? r.lift.toFixed(2) : 'new', r.p.toExponential(2), r.w1, r.w2, r.pair].map(q).join(',')))
     .join('\n') + '\n');
 const first = PCTS[0], bestK = Math.max(1, Math.round(N * first / 100)), winners0 = rewarded.slice(0, bestK);
-fs.writeFileSync(path.join(DATA, `pons_recipe_${WINDOW}.md`), `# Pons winning profile — WINDOW=${WINDOW} · top ${first}% (rw ≥ ${winners0.at(-1)?.rw.toFixed(4)}) · ${new Date().toISOString()}
-Winners = ${bestK} of ${N} earning launches. Key: ${WINDOW === 'all' ? 'creatorComp (swept+rescued+pending, curve+hook, + buyback quote)' : `creator fees GENERATED in first ${WINDOW}`}.
+fs.writeFileSync(path.join(DATA, `pons_recipe_${WINDOW}.md`), `# Pons winning profile — WINDOW=${WINDOW} · top ${first}% (rw ≥ $${winners0.at(-1)?.rw.toFixed(2)}) · ${new Date().toISOString()}
+Winners = ${bestK} of ${N} earning launches · currency: USD (ETH_USD=${ETH_USD}) · key: ${WINDOW === 'all' ? 'creatorComp in USD (earnings+buyback, swept+rescued+pending, curve+hook)' : `creator fees GENERATED in first ${WINDOW}`}.
 
 ## What winners have
  ${allResults.filter(r => r.slicePct === first && !r.pair && r.w1 >= Math.min(MIN_SUP, bestK))
@@ -306,7 +353,8 @@ Winners = ${bestK} of ${N} earning launches. Key: ${WINDOW === 'all' ? 'creatorC
   .map(r => `- ${(100 * r.winPct).toFixed(0)}% had ${r.id} vs ${(100 * r.restPct).toFixed(0)}% baseline (${liftS(r.lift)})`).join('\n') || '—'}
 
 ## Read me
-- Require lift ≥ 1.3 AND p below the Bonferroni line printed in console.
+- Require lift ≥ 1.3 AND p below the Bonferroni line AND n ≥ ~30 before acting.
+- For graduated tokens, bps is inflated by design (curve volume only; V4-pool volume not yet captured).
 - Snipe tax suppresses first-minute buys by design — read vol@1m traits with that in mind.
 - Letters/words are correlational and rotate; re-run weekly, diff pons_traits.csv.
 - Correlation ≠ causation: validate by launching variants and re-profiling with this same pipeline.
