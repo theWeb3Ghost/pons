@@ -1,14 +1,14 @@
 {
   "phase": "time-capped",
-  "currentBlock": 68676044,
-  "headBlock": 68818843,
-  "pct": 99.66,
-  "activityBlock": 50219866,
-  "factoryBlock": 68676044,
-  "launches": 569539,
+  "currentBlock": 68873033,
+  "headBlock": 69011372,
+  "pct": 99.67,
+  "activityBlock": 50321866,
+  "factoryBlock": 68873033,
+  "launches": 572268,
   "chunk": 9000,
-  "blocksPerSec": 1989.4,
-  "etaMinutes": 1.2,
-  "pid": 2357,
-  "updatedAt": "2026-09-21T13:05:10.636Z"
+  "blocksPerSec": 6.8,
+  "etaMinutes": 337.6,
+  "pid": 2276,
+  "updatedAt": "2026-09-21T18:26:33.881Z"
 }
