@@ -46,7 +46,7 @@ const C = {
   PROBE_PENDING: process.env.PROBE_PENDING !== '0',
   MAX_MINUTES: Number(process.env.INDEX_MAX_MINUTES) || 0,
   SUPPLY_FETCH: process.env.SUPPLY_FETCH === '1',
-  ENRICH_PER_RUN: Number(process.env.ENRICH_PER_RUN) || 4000,
+  ENRICH_PER_RUN: Number(process.env.ENRICH_PER_RUN) || 6000,
 };
 
 /* ── EXACT event signatures (from verified source) ──────────────────── */
@@ -779,7 +779,7 @@ async function backfill() {
     if (n) process.stdout.write(`(+${n})`);
   }
   saveLaunches(); saveState(); persistAnchors(); ensurePairs();   // BANK FIRST
-  if (!outOfTime()) {
+
     // earners-first enrichment: highest creator earnings get metadata first
     const needy = [...L.values()].filter(l => (!l.enriched || !l.metaFromTx) && l.launchTx);
     needy.sort((a, b) => Number(b.sweptCurve + b.rescuedCreator + b.poolCreator + b.poolRescued)
@@ -788,7 +788,7 @@ async function backfill() {
     if (enrichQueue.length) log(`[enrich] ${enrichQueue.length} pending · earners-first · cap ${C.ENRICH_PER_RUN}/run`);
     await drainEnrich(C.ENRICH_PER_RUN);
     saveLaunches(); saveState(); ensurePairs();
-  }
+  
   if (C.PROBE_PENDING && !outOfTime()) {
     let i = 0;
     for (const l of L.values()) { await probePending(l); if (++i % 200 === 0) { log(`[pending] ${i}/${L.size}`); saveLaunches(); } }
