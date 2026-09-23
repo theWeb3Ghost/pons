@@ -476,14 +476,16 @@ function decodeSocials5(ret) {
   } catch { return null; }
 }
 
-/* ── enrichment (earners prioritized by backfill; generic drain here) ── */
+
+/* ── enrichment (FAST: 2-3 calls/token; tx-input carries all form fields) ── */
 const enrichQueue = [];
-async function drainEnrich(maxItems = Infinity) {
+async function drainEnrich(maxItems = Infinity, deadline = Infinity) {
   let n = 0;
-  while (enrichQueue.length && n < maxItems) {
+  while (enrichQueue.length && n < maxItems && Date.now() < deadline) {
     const token = enrichQueue.shift();
     const l = L.get(token); if (!l || (l.enriched && l.metaFromTx)) continue;
     try {
+      // 1) launch tx input — ALL form fields (name/sym/logo/desc/socials/tax/recipient/exemptions/buyback)
       if (l.launchTx && !l.metaFromTx) {
         const m = await fetchLaunchTxMeta(l.launchTx);
         if (m) {
@@ -501,7 +503,7 @@ async function drainEnrich(maxItems = Infinity) {
           l.metaFromTx = true;
         }
       }
-      if (!l.curve) { const c = await callAddr(token, 'curve()'); if (c && c !== ZERO_ADDR) { l.curve = c; curveToToken.set(c, token); } }
+      // 2) factory launch state (1 call): threshold, pool params, recipient/pair backup
       const g = decodeLaunchedToken(await ethCall(C.FACTORY, SELS.glt + pad32(token)));
       if (g?.exists) {
         if (!l.feeRecipient && g.creatorFeeRecipient && g.creatorFeeRecipient !== ZERO_ADDR) l.feeRecipient = g.creatorFeeRecipient;
@@ -510,35 +512,27 @@ async function drainEnrich(maxItems = Infinity) {
         if (g.graduationThreshold) l.graduationThreshold = g.graduationThreshold;
         l.poolFee = g.poolFee; l.tickSpacing = g.tickSpacing; l.phase = g.phase;
       }
-      if (l.curve) {
-        if (!l.creatorTaxBps) l.creatorTaxBps = await callUint(l.curve, 'creatorTaxBps()');
-        if (!l.curveFeeBps) l.curveFeeBps = await callUint(l.curve, 'feeBps()');
-        if (!l.protocolShareBps) l.protocolShareBps = await callUint(l.curve, 'protocolFeeShareBps()');
-        if (!l.buybackBurnBps) l.buybackBurnBps = await callUint(l.curve, 'buybackBurnBps()');
-        if (!l.snipeTaxStartBps) l.snipeTaxStartBps = await callUint(l.curve, 'snipeTaxStartBps()');
-        if (!l.snipeTaxSeconds) l.snipeTaxSeconds = await callUint(l.curve, 'snipeTaxSeconds()');
-      }
-      if (!l.name)   l.name   = decodeOneString(await ethCall(token, sel('name()')))   || l.name;
-      if (!l.symbol) l.symbol = decodeOneString(await ethCall(token, sel('symbol()'))) || l.symbol;
-      if (!l.twitter && !l.description) {
-        const soc = decodeSocials5(await ethCall(token, SELS.socials));
-        if (soc) { [l.twitter, l.telegram, l.discord, l.website, l.farcaster] = soc; }
-        l.description = decodeOneString(await ethCall(token, SELS.description)) || l.description;
-        l.image = decodeOneString(await ethCall(token, SELS.logo)) || l.image;
-      }
+      // 3) non-ETH pair decimals (1 call, only when needed — required for USD math)
       if (l.pairAsset && l.pairAsset !== ZERO_ADDR && !l.ethPair) {
         l.pairDecimals = await decimalsOf(l.pairAsset);
-        if (!PAIRS[l.pairAsset]) { PAIRS[l.pairAsset] = { symbol: '', usd: 0, decimals: l.pairDecimals }; }
+        if (!PAIRS[l.pairAsset]) PAIRS[l.pairAsset] = { symbol: '', usd: 0, decimals: l.pairDecimals };
         else PAIRS[l.pairAsset].decimals = l.pairDecimals;
       }
-      if (C.SUPPLY_FETCH && !(l.totalSupply > 0n)) l.totalSupply = await callUint(token, 'totalSupply()');
       l.enriched = true;
     } catch {}
-    if (++n % 20 === 0) await sleep(100);
+    n++;
+    if (n % 500 === 0) { saveLaunches(); ensurePairs();
+      log(`[enrich] ${n} done · ${enrichQueue.length} left · ${Math.max(0, Math.round((deadline - Date.now()) / 60000))}min to deadline`); }
+    if (n % 20 === 0) await sleep(100);
   }
+  saveLaunches();
+  if (Date.now() >= deadline) log('[enrich] deadline reached — progress saved, exiting cleanly');
 }
 
+
 /* ── window buckets (cumulative: 1h ⊂ 24h ⊂ all) ────────────────────── */
+
+
 function wOf(l, ts) { const dt = ts - l.launchTs; return dt <= 3600 ? 3 : dt <= 86400 ? 2 : 1; }
 function addW(l, base, amt, ts) { const w = wOf(l, ts);
   if (w >= 2) l[base + '24h'] = (l[base + '24h'] ?? 0n) + amt;
@@ -739,9 +733,16 @@ function tick(force, headBlock, phase) {
   if (now - lastFullSave > 60000) { lastFullSave = now; saveLaunches(); }
 }
 
+
+
+
+
+
 async function backfill() {
   const t0 = Date.now();
   const outOfTime = () => C.MAX_MINUTES > 0 && (Date.now() - t0) / 60000 > C.MAX_MINUTES;
+  
+  const DEADLINE = t0 + 330 * 60000;   // hard exit before GitHub's 350-min kill
   const h0 = await head();
   log(`head=${h0} · resume factory@${STATE.factoryBlock + 1} activity@${STATE.activityBlock + 1} · chunk=${STATE.chunk}`);
   if (!STATE.satsFound) {
@@ -778,16 +779,15 @@ async function backfill() {
     STATE.activityBlock = to; tick(false, STATE.factoryBlock, 'activity');
     if (n) process.stdout.write(`(+${n})`);
   }
-  saveLaunches(); saveState(); persistAnchors(); ensurePairs();   // BANK FIRST
-
-    // earners-first enrichment: highest creator earnings get metadata first
-    const needy = [...L.values()].filter(l => (!l.enriched || !l.metaFromTx) && l.launchTx);
-    needy.sort((a, b) => Number(b.sweptCurve + b.rescuedCreator + b.poolCreator + b.poolRescued)
-                       - Number(a.sweptCurve + a.rescuedCreator + a.poolCreator + a.poolRescued));
-    for (const l of needy) enrichQueue.push(l.token);
-    if (enrichQueue.length) log(`[enrich] ${enrichQueue.length} pending · earners-first · cap ${C.ENRICH_PER_RUN}/run`);
-    await drainEnrich(C.ENRICH_PER_RUN);
-    saveLaunches(); saveState(); ensurePairs();
+   saveLaunches(); saveState(); persistAnchors(); ensurePairs();   // BANK FIRST (unchanged)
+  // earners-first enrichment — FAST mode (2-3 calls/token), deadline-aware
+  const needy = [...L.values()].filter(l => (!l.enriched || !l.metaFromTx) && l.launchTx);
+  needy.sort((a, b) => Number(b.sweptCurve + b.rescuedCreator + b.poolCreator + b.poolRescued)
+                     - Number(a.sweptCurve + a.rescuedCreator + a.poolCreator + a.poolRescued));
+  for (const l of needy) enrichQueue.push(l.token);
+  if (enrichQueue.length) log(`[enrich] ${enrichQueue.length} pending · earners-first · deadline in ${Math.max(0, Math.round((DEADLINE - Date.now()) / 60000))}min`);
+  await drainEnrich(C.ENRICH_PER_RUN, DEADLINE);
+  saveLaunches(); saveState(); ensurePairs();
   
   if (C.PROBE_PENDING && !outOfTime()) {
     let i = 0;
