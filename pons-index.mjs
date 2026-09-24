@@ -284,26 +284,40 @@ function ensurePairs() {
   const t = `${P.pairs}.tmp`; fs.writeFileSync(t, JSON.stringify(PAIRS, null, 2)); fs.renameSync(t, P.pairs);
 }
 
+
+
+const KEEP_DAYS = Number(process.env.KEEP_DAYS) || 80;
 function saveLaunches() {
   const t = `${P.launches}.tmp`;
   const fd = fs.openSync(t, 'w');
+  const now = Math.floor(Date.now() / 1000);
+  let kept = 0, dropped = 0;
   const all = [...L.values()], BATCH = 1000;
   for (let i = 0; i < all.length; i += BATCH) {
-    const chunk = all.slice(i, i + BATCH).map(l => {
+    const lines = [];
+    for (const l of all.slice(i, i + BATCH)) {
+      const alive = (l.buyVolume + l.sellVolume) > 0n || l.graduated
+        || l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued > 0n
+        || (l.launchTs && now - l.launchTs < KEEP_DAYS * 86400);
+      if (!alive) { dropped++; continue; }
+      kept++;
       const earnings = l.sweptCurve + l.rescuedCreator + l.poolCreator + l.poolRescued + l.pendingCurve + l.pendingHook;
-      return JSON.stringify({ ...l,
+      lines.push(JSON.stringify({ ...l,
         buyersN: Math.max(l._bN || 0, l.buyers.size),
         sellersN: Math.max(l._sN || 0, l.sellers.size),
         snipersN: Math.max(l._snN || 0, l.snipers.size),
         buyers: undefined, sellers: undefined, snipers: undefined, snipeExemptions: undefined,
         creatorReward: earnings, totalVolume: l.buyVolume + l.sellVolume,
-        buybackTotalQuote: l.buybackQuote, creatorComp: earnings + l.buybackQuote }, replacer);
-    }).join('\n') + '\n';
-    fs.writeFileSync(fd, chunk);
+        buybackTotalQuote: l.buybackQuote, creatorComp: earnings + l.buybackQuote }, replacer));
+    }
+    if (lines.length) fs.writeFileSync(fd, lines.join('\n') + '\n');
   }
   fs.closeSync(fd);
   fs.renameSync(t, P.launches);
+  STATE.totalDiscovered = Math.max(STATE.totalDiscovered || 0, L.size);
+  if (dropped > 1000) log(`[prune] kept ${kept} active · dropped ${dropped} dead (total ever: ${STATE.totalDiscovered})`);
 }
+
 
 async function loadLaunches() {
   if (!fs.existsSync(P.launches) && fs.existsSync(P.launches + '.gz'))
