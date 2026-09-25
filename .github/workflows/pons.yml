@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write        # ← add these two lines
+  contents: write
 
 jobs:
   index:
@@ -19,25 +19,45 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
+
       - name: Install dependency
         run: npm install js-sha3
 
-      - name: Index (catch up, self-quits at 4h so data always saves)
+      - name: Download dataset from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pons_data
+          gh release download dataset -R "$GITHUB_REPOSITORY" -D /tmp/ds --clobber 2>/dev/null || echo "first run: no dataset yet"
+          for f in pons_launches.jsonl.gz state.json anchors.json rpc_state.json progress.json; do
+            cp /tmp/ds/$f pons_data/ 2>/dev/null || true
+          done
+          ls -la pons_data/
+
+      - name: Index
         env:
           RPC_URLS: ${{ secrets.RPC_URLS }}
           START_BLOCK: ${{ secrets.START_BLOCK }}
-          INDEX_MAX_MINUTES: 240
+          INDEX_MAX_MINUTES: '240'
           CHUNK: '9000'
-          PROBE_PENDING: '0'
           ACT_CHUNK: '6000'
+          ENRICH_PER_RUN: '6000'
+          PROBE_PENDING: '0'
         run: node pons-index.mjs --backfill
 
-      - name: Save data back to repo
+      - name: Upload dataset to release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          gzip -kf pons_data/pons_launches.jsonl 2>/dev/null || true
+          rm -f pons_data/pons_launches.jsonl
+          FILES="pons_data/pons_launches.jsonl.gz pons_data/state.json pons_data/anchors.json pons_data/rpc_state.json pons_data/progress.json pons_data/pairs.json"
+          gh release create dataset $FILES -R "$GITHUB_REPOSITORY" -t "Pons dataset" -n "Auto-updated by the indexer" 2>/dev/null \
+            || gh release upload dataset $FILES -R "$GITHUB_REPOSITORY" --clobber
           git config user.name "pons-bot"
           git config user.email "actions@github.com"
-          gzip -kf pons_data/pons_launches.jsonl && rm -f pons_data/pons_launches.jsonl
-          git add pons_data/
-          git diff --cached --quiet || git commit -m "data $(date -u +%FT%TZ)"
+          git add pons_data/pairs.json
+          git diff --cached --quiet || git commit -m "pairs update"
           git pull --rebase -X ours origin main || true
           git push
