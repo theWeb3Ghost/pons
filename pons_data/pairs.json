@@ -343,5 +343,10 @@
     "symbol": "",
     "usd": 0,
     "decimals": 18
+  },
+  "0x07ebb29a38fbcb41563817e5e19f2cec619c90d2": {
+    "symbol": "",
+    "usd": 0,
+    "decimals": 18
   }
 }
